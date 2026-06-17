@@ -95,7 +95,7 @@ public class NubeFact_v1 implements IFiscalSender, IFiscalDocumentChecker, IFisc
                 throw new AdempiereException("@SP013.UnsupportedDocument@");
             }
             JsonNode response = client.post(body);
-            //	The baja is async at SUNAT (returns a ticket): the NubeFact request being accepted is enough.
+            //	The cancel is async at SUNAT (returns a ticket): the NubeFact request being accepted is enough.
             return processResponse(response, fiscalDocument, false);
         } catch (AdempiereException e) {
             throw e;

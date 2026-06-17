@@ -150,7 +150,14 @@ public class NF_InvoiceDocument implements INubeFactDocument {
      * NubeFact currency code (moneda)
      */
     public int getCurrencyCode() {
-        String currencyCode = Optional.ofNullable(document.getCurrencyCode()).orElse("").trim().toUpperCase();
+        return toNubeFactCurrency(document.getCurrencyCode());
+    }
+
+    /**
+     * Map an ISO currency code to the NubeFact numeric currency code (moneda). Defaults to Soles.
+     */
+    protected int toNubeFactCurrency(String isoCode) {
+        String currencyCode = Optional.ofNullable(isoCode).orElse("").trim().toUpperCase();
         switch (currencyCode) {
             case "USD":
                 return CURRENCY_USD;
@@ -293,12 +300,12 @@ public class NF_InvoiceDocument implements INubeFactDocument {
         String reversalNo = Optional.ofNullable(reversalDocument.getFiscalSenderNo())
                 .filter(value -> !Util.isEmpty(value, true))
                 .orElse(reversalDocument.getDocumentNo());
-        if(Util.isEmpty(reversalNo, true) || !reversalNo.contains("-")) {
+        String[] seriesNumber = splitFiscalNumber(reversalNo);
+        if(seriesNumber == null) {
             return;
         }
-        int dash = reversalNo.indexOf('-');
-        String series = reversalNo.substring(0, dash).trim();
-        String number = reversalNo.substring(dash + 1).replaceAll("\\D", "");
+        String series = seriesNumber[0];
+        String number = seriesNumber[1];
         //	1 = modifies a Factura, 2 = modifies a Boleta (series prefix F / B)
         int modifiedType = series.toUpperCase().startsWith("B") ? 2 : 1;
         comprobante.put(NubeFactFields.MODIFIED_DOCUMENT_TYPE, modifiedType);
@@ -345,5 +352,19 @@ public class NF_InvoiceDocument implements INubeFactDocument {
 
     protected BigDecimal scale(BigDecimal amount) {
         return Optional.ofNullable(amount).orElse(BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Split a fiscal number in SERIE-NUMERO format (e.g. F001-123) into {series, number}, where the
+     * number keeps only its digits. Returns null when the value is empty or has no SERIE-NUMERO shape.
+     */
+    protected String[] splitFiscalNumber(String fiscalNumber) {
+        if(Util.isEmpty(fiscalNumber, true) || !fiscalNumber.contains("-")) {
+            return null;
+        }
+        int dash = fiscalNumber.indexOf('-');
+        String series = fiscalNumber.substring(0, dash).trim();
+        String number = fiscalNumber.substring(dash + 1).replaceAll("\\D", "");
+        return new String[]{series, number};
     }
 }

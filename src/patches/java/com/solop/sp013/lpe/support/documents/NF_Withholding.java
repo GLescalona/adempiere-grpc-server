@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.solop.sp013.core.documents.IFiscalDocumentLine;
+import com.solop.sp013.core.documents.RelatedDocument;
 import org.compiere.util.Util;
 
 import java.math.BigDecimal;
@@ -22,9 +23,9 @@ import java.util.Optional;
  * Synchronous (the response already carries aceptada_por_sunat). Sent to the same RUTA/token, has no
  * {@code tipo_de_comprobante}; its items are the related documents (invoices) with the amount applied.
  *
- * NOTE: the per-item related-document identity (tipo / serie / número / fecha) is NOT carried by the
- * generic IFiscalDocument; it is emitted with best-effort values and marked TODO. To issue a valid
- * document those fields must be sourced from the document allocations (related invoice + payment).
+ * The per-item related-document identity (tipo / serie / número / fecha) is resolved by the core from
+ * {@code WH_Withholding.SourceInvoice_ID} and exposed via {@link IFiscalDocumentLine#getRelatedDocument()}.
+ * The payment/collection date and number are still derived (the model carries no allocation linkage).
  *
  * @author Gabriel Escalona
  */
@@ -82,14 +83,41 @@ public class NF_Withholding extends NF_InvoiceDocument {
             BigDecimal base = scale(line.getWithholdingBaseAmount());
             //	Perception adds to the amount, retention subtracts from it
             BigDecimal withAmount = perception ? base.add(applied) : base.subtract(applied);
+            //	Related (source) document identity: type / serie / numero / fecha de emision.
+            //	Resolved by the core from WH_Withholding.SourceInvoice_ID; falls back to safe defaults.
+            RelatedDocument related = line.getRelatedDocument();
+            String relatedType = RELATED_DOCUMENT_INVOICE;
+            String relatedSeries = "";
+            long relatedNumber = 0;
+            String relatedIssueDate = emissionDate;
+            int relatedCurrency = getCurrencyCode();
+            if(related != null) {
+                if(!Util.isEmpty(related.getDocumentType(), true)) {
+                    relatedType = related.getDocumentType();
+                }
+                String fiscalNo = Optional.ofNullable(related.getFiscalDocumentNo())
+                        .filter(value -> !Util.isEmpty(value, true))
+                        .orElse(related.getDocumentNo());
+                String[] seriesNumber = splitFiscalNumber(fiscalNo);
+                if(seriesNumber != null) {
+                    relatedSeries = seriesNumber[0];
+                    if(!Util.isEmpty(seriesNumber[1], true)) {
+                        relatedNumber = Long.parseLong(seriesNumber[1]);
+                    }
+                }
+                if(related.getDocumentDate() != null) {
+                    relatedIssueDate = dateFormat.format(related.getDocumentDate());
+                }
+                if(!Util.isEmpty(related.getCurrencyCode(), true)) {
+                    relatedCurrency = toNubeFactCurrency(related.getCurrencyCode());
+                }
+            }
             ObjectNode item = mapper.createObjectNode();
-            //	TODO related document identity (needs the document allocations in the model):
-            //	documento_relacionado_tipo / _serie / _numero / _fecha_de_emision
-            item.put(NubeFactFields.RELATED_DOCUMENT_TYPE, RELATED_DOCUMENT_INVOICE);
-            item.put(NubeFactFields.RELATED_DOCUMENT_SERIES, "");
-            item.put(NubeFactFields.RELATED_DOCUMENT_NUMBER, 0);
-            item.put(NubeFactFields.RELATED_DOCUMENT_ISSUE_DATE, emissionDate);
-            item.put(NubeFactFields.RELATED_DOCUMENT_CURRENCY, getCurrencyCode());
+            item.put(NubeFactFields.RELATED_DOCUMENT_TYPE, relatedType);
+            item.put(NubeFactFields.RELATED_DOCUMENT_SERIES, relatedSeries);
+            item.put(NubeFactFields.RELATED_DOCUMENT_NUMBER, relatedNumber);
+            item.put(NubeFactFields.RELATED_DOCUMENT_ISSUE_DATE, relatedIssueDate);
+            item.put(NubeFactFields.RELATED_DOCUMENT_CURRENCY, relatedCurrency);
             item.put(NubeFactFields.RELATED_DOCUMENT_TOTAL, base);
             item.put(perception ? NubeFactFields.PERCEPTION_COLLECTION_DATE : NubeFactFields.RETENTION_PAYMENT_DATE, emissionDate);
             item.put(perception ? NubeFactFields.COLLECTION_NUMBER : NubeFactFields.PAYMENT_NUMBER, paymentNumber++);

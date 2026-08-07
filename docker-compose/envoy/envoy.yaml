@@ -47,7 +47,6 @@ static_resources:
               services:
                 # package.service
                 # - services_enabled
-                - bank_statement_match.BankStatementMatch
                 - core_functionality.CoreFunctionality
                 - data.BusinessData
                 - data.Store
@@ -61,10 +60,12 @@ static_resources:
                 - field.business_partner.BusinessPartnerInfoService
                 - field.in_out.InOutInfoService
                 - field.invoice.InvoiceInfoService
+                - field.location_address.LocationAddressService
                 - field.order.OrderInfoService
                 - field.payment.PaymentInfoService
                 - field.product.ProductInfoService
                 - file_management.FileManagement
+                - form.bank_statement_match.BankStatementMatch
                 - form.express_shipment.ExpressShipmentService
                 - form.out_bound_order.OutBoundOrderService
                 - form.payment_allocation.PaymentAllocation
@@ -72,7 +73,6 @@ static_resources:
                 - general_ledger.GeneralLedger
                 - import_file_loader.ImportFileLoader
                 - issue_management.IssueManagement
-                - location_address.LocationAddress
                 - logs.Logs
                 - match_po_receipt_invoice.MatchPORReceiptInvoice
                 - material_management.MaterialManagement

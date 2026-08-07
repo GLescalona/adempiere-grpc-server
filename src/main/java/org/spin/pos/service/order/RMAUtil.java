@@ -41,6 +41,7 @@ import org.compiere.util.Msg;
 import org.compiere.util.Trx;
 import org.spin.pos.service.payment.PaymentManagement;
 import org.spin.pos.util.ColumnsAdded;
+import org.spin.store.model.MCPaymentMethod;
 
 /**
  * A util class for change values for documents
@@ -180,14 +181,18 @@ public class RMAUtil {
 		returnOrder.setAD_Org_ID(pos.getAD_Org_ID());
 		returnOrder.setM_Warehouse_ID(pos.getM_Warehouse_ID());
 		returnOrder.saveEx(sourceOrder.get_TrxName());
-		int targetDocumentTypeId = RMAUtil.getReturnDocumentTypeId(sourceOrder.getC_POS_ID(), pos.getC_POS_ID(), sourceOrder.getC_DocTypeTarget_ID());
+
 		//	Set Document base for return
-		if(targetDocumentTypeId != 0) {
-        	returnOrder.setC_DocTypeTarget_ID(targetDocumentTypeId);
-        } else {
-        	returnOrder.setC_DocTypeTarget_ID(MDocType.getDocTypeBaseOnSubType(sourceOrder.getAD_Org_ID(), 
-            		MDocType.DOCBASETYPE_SalesOrder , MDocType.DOCSUBTYPESO_ReturnMaterial));
-    	}
+		int targetDocumentTypeId = RMAUtil.getReturnDocumentTypeId(sourceOrder.getC_POS_ID(), pos.getC_POS_ID(), sourceOrder.getC_DocTypeTarget_ID());
+		if (targetDocumentTypeId <= 0) {
+			targetDocumentTypeId = MDocType.getDocTypeBaseOnSubType(
+				sourceOrder.getAD_Org_ID(),
+				MDocType.DOCBASETYPE_SalesOrder,
+				MDocType.DOCSUBTYPESO_ReturnMaterial
+			);
+		}
+		returnOrder.setC_DocTypeTarget_ID(targetDocumentTypeId);
+
         //	Set references
 		returnOrder.setC_POS_ID(pos.getC_POS_ID());
 		returnOrder.setC_BPartner_ID(sourceOrder.getC_BPartner_ID());
@@ -247,7 +252,7 @@ public class RMAUtil {
 	 * @param returnOrder
 	 * @param transactionName
 	 */
-	public static void createReversedPayments(MPOS pos, MOrder sourceOrder, MOrder returnOrder, String transactionName) {
+	public static void createReversedPayments(MPOS pos, MOrder sourceOrder, MOrder returnOrder, boolean isManualDocument, String transactionName) {
 		MPayment.getOfOrder(sourceOrder).forEach(sourcePayment -> {
 			MPayment returnPayment = new MPayment(sourceOrder.getCtx(), 0, transactionName);
 			PO.copyValues(sourcePayment, returnPayment);
@@ -261,7 +266,32 @@ public class RMAUtil {
 			returnPayment.setDocStatus(DocAction.STATUS_Drafted);
 			returnPayment.setC_Order_ID(returnOrder.getC_Order_ID());
 			returnPayment.setIsPrepayment(sourcePayment.isPrepayment());
-			if (sourcePayment.isOnline()) {
+			if (isManualDocument) {
+				// Force all reversed payments to cash for manual document returns
+				returnPayment.setIsOnline(false);
+				returnPayment.setR_PnRef(null);
+				returnPayment.setR_PnRef_DC(null);
+				returnPayment.set_ValueOfColumn("ResponseStatus", null);
+				returnPayment.set_ValueOfColumn("NextRequestTime", 0);
+				returnPayment.set_ValueOfColumn("ResponseMessage", null);
+				returnPayment.set_ValueOfColumn("ResponseCode", null);
+				returnPayment.setIsApproved(false);
+				returnPayment.setR_AuthCode(null);
+				returnPayment.setR_Info(null);
+				returnPayment.setR_RespMsg(null);
+				returnPayment.setR_Result(null);
+				returnPayment.setTenderType(MPayment.TENDERTYPE_Cash);
+				returnPayment.setC_BankAccount_ID(pos.getC_BankAccount_ID());
+				String whereClause = "TenderType = ?";
+				int paymentMethodId = new Query(returnPayment.getCtx(), MCPaymentMethod.Table_Name, whereClause, transactionName)
+					.setParameters(MPayment.TENDERTYPE_Cash)
+					.setOnlyActiveRecords(true)
+					.setClient_ID()
+					.firstId();
+				if (paymentMethodId > 0) {
+					returnPayment.setC_PaymentMethod_ID(paymentMethodId);
+				}
+			} else if (sourcePayment.isOnline()) {
 				returnPayment.setIsOnline(true);
 				returnPayment.setR_PnRef_DC(sourcePayment.getR_PnRef_DC());
 				returnPayment.setR_PnRef(null);
@@ -281,7 +311,9 @@ public class RMAUtil {
 				pos,
 				returnPayment,
 				null,
-				null
+				true,
+				isManualDocument,
+				transactionName
 			);
 
 			returnPayment.saveEx();

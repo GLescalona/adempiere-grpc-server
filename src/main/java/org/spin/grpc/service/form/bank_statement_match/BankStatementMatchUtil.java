@@ -17,15 +17,20 @@ package org.spin.grpc.service.form.bank_statement_match;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.List;
 
-import org.adempiere.core.domains.models.I_C_BankAccount;
+import org.adempiere.core.domains.models.I_C_BankStatementLineMatch;
 import org.adempiere.core.domains.models.I_C_Payment;
 import org.adempiere.core.domains.models.I_I_BankStatement;
 import org.adempiere.exceptions.AdempiereException;
 import org.compiere.model.MBankAccount;
+import org.compiere.model.MBankStatementLineMatch;
 import org.compiere.model.MRole;
 import org.compiere.model.Query;
+import org.compiere.util.DB;
 import org.compiere.util.Env;
+import org.compiere.util.Util;
+import org.spin.backend.grpc.form.bank_statement_match.MatchMode;
 
 public class BankStatementMatchUtil {
 
@@ -33,15 +38,17 @@ public class BankStatementMatchUtil {
 		if (bankAccountId <= 0) {
 			throw new AdempiereException("@FillMandatory@ @C_BankAccount_ID@");
 		}
-		MBankAccount bankAccount = new Query(
-			Env.getCtx(),
-			I_C_BankAccount.Table_Name,
-			" C_BankAccount_ID = ? ",
-			null
-		)
-			.setParameters(bankAccountId)
-			.setClient_ID()
-			.first();
+		// MBankAccount bankAccount = new Query(
+		// 	Env.getCtx(),
+		// 	I_C_BankAccount.Table_Name,
+		// 	" C_BankAccount_ID = ? ",
+		// 	null
+		// )
+		// 	.setParameters(bankAccountId)
+		// 	.setClient_ID()
+		// 	.first()
+		// ;
+		MBankAccount bankAccount = MBankAccount.get(Env.getCtx(), bankAccountId);
 		if (bankAccount == null || bankAccount.getC_BankAccount_ID() <= 0) {
 			throw new AdempiereException("@C_BankAccount_ID@ @NotFound@");
 		}
@@ -49,15 +56,39 @@ public class BankStatementMatchUtil {
 	}
 
 
+
+	public static int getDefaultChargeId() {
+		final int clientId = Env.getAD_Client_ID(Env.getCtx());
+		final int defaultChargeId = DB.getSQLValue(
+			null,
+			"SELECT MAX(C_Charge_ID) FROM C_Charge WHERE AD_Client_ID = ? AND IsActive = 'Y' ",
+			clientId
+		);
+		return defaultChargeId;
+	}
+
+	public static int validateAndGetDefaultChargeId() {
+		final int defaultChargeId = BankStatementMatchUtil.getDefaultChargeId();
+		if(defaultChargeId <= 0) {
+			throw new AdempiereException("@C_Charge_ID@ (" + defaultChargeId + ") @NotFound@");
+		}
+		return defaultChargeId;
+	}
+
+
+
 	public static Query buildPaymentQuery(
 		int bankStatementId,
 		int bankAccountId,
-		boolean isMatchedMode,
+		int matchMode,
 		Timestamp dateFrom,
 		Timestamp dateTo,
 		BigDecimal paymentAmountFrom,
 		BigDecimal paymentAmountTo,
-		int businessPartnerId
+		int businessPartnerId,
+		String searchValue,
+		String isReceipt,
+		boolean isMultiPaymentMatch
 	) {
 		String whereClasuePayment = "C_BankAccount_ID = ? "
 			+ " AND DocStatus NOT IN('IP', 'DR') "
@@ -65,26 +96,54 @@ public class BankStatementMatchUtil {
 		;
 
 		if(bankStatementId > 0) {
-			whereClasuePayment += "AND NOT EXISTS(SELECT 1 FROM C_BankStatement bs "
-				+ "INNER JOIN C_BankStatementLine bsl "
-				+ "ON(bsl.C_BankStatement_ID = bs.C_BankStatement_ID) "
-				+ "WHERE bsl.C_Payment_ID = C_Payment.C_Payment_ID "
-				+ "AND bs.DocStatus IN('CO', 'CL') "
-				+ "AND bsl.C_BankStatement_ID <> " + bankStatementId + ") "
+			whereClasuePayment +=
+				"AND NOT EXISTS("
+					+ "SELECT 1 FROM C_BankStatement AS bs "
+					+ "INNER JOIN C_BankStatementLine AS bsl "
+						+ "ON bsl.C_BankStatement_ID = bs.C_BankStatement_ID "
+					+ "WHERE bsl.C_Payment_ID = C_Payment.C_Payment_ID "
+						+ "AND bs.DocStatus IN('CO', 'CL') "
+						+ "AND bsl.C_BankStatement_ID <> " + bankStatementId
+				+ ") "
 			;
 		}
 
 		ArrayList<Object> paymentFilters = new ArrayList<Object>();
 		paymentFilters.add(bankAccountId);
 
-		//	Match
-		// if(isMatchedMode) {
-		// 	whereClasuePayment += "AND EXISTS(SELECT 1 FROM I_BankStatement ibs "
-		// 		+ "WHERE ibs.C_Payment_ID = C_Payment.C_Payment_ID) ";
-		// } else {
-		// 	whereClasuePayment += "AND NOT EXISTS(SELECT 1 FROM I_BankStatement ibs "
-		// 		+ "WHERE ibs.C_Payment_ID = C_Payment.C_Payment_ID) ";
-		// }
+		//	Match (skipped when isMultiPaymentMatch=true; the EXISTS filter below covers it)
+		if (!isMultiPaymentMatch) {
+			if(matchMode == MatchMode.MODE_MATCHED_VALUE) {
+				whereClasuePayment += "AND ("
+					+ "EXISTS("
+						+ "SELECT 1 "
+						+ "FROM I_BankStatement AS ibs "
+						+ "WHERE ibs.C_Payment_ID = C_Payment.C_Payment_ID"
+					+ ") "
+					+ "OR EXISTS("
+						+ "SELECT 1 "
+						+ "FROM C_BankStatementLineMatch AS bslm "
+						+ "WHERE bslm.C_Payment_ID = C_Payment.C_Payment_ID"
+					+ ") "
+				+ ") ";
+			} else if (matchMode == MatchMode.MODE_NOT_MATCHED_VALUE) {
+				whereClasuePayment += "AND ("
+					+ "NOT EXISTS("
+						+ "SELECT 1 "
+						+ "FROM I_BankStatement AS ibs "
+						+ "WHERE ibs.C_Payment_ID = C_Payment.C_Payment_ID "
+							+ "AND COALESCE(ibs.IsManualMatch, 'N') = 'N' "
+					+ ") "
+					+ "AND NOT EXISTS("
+						+ "SELECT 1 "
+						+ "FROM C_BankStatementLineMatch AS bslm "
+						+ "WHERE bslm.C_Payment_ID = C_Payment.C_Payment_ID"
+					+ ") "
+				+ ") ";
+			} else {
+				// all mode MatchMode.MODE_ALL
+			}
+		}
 
 		//	Date Trx
 		if (dateFrom != null) {
@@ -96,13 +155,13 @@ public class BankStatementMatchUtil {
 			paymentFilters.add(dateTo);
 		}
 
-		//	Amount
+		//	Amount (negate for payments IsReceipt='N' to match visual display)
 		if (paymentAmountFrom != null) {
-			whereClasuePayment += "PayAmt >= ? ";
+			whereClasuePayment += "AND (CASE WHEN IsReceipt = 'N' THEN -PayAmt ELSE PayAmt END) >= ? ";
 			paymentFilters.add(paymentAmountFrom);
 		}
 		if (paymentAmountTo != null) {
-			whereClasuePayment += "PayAmt <= ? ";
+			whereClasuePayment += "AND (CASE WHEN IsReceipt = 'N' THEN -PayAmt ELSE PayAmt END) <= ? ";
 			paymentFilters.add(paymentAmountTo);
 		}
 
@@ -110,6 +169,34 @@ public class BankStatementMatchUtil {
 		if (businessPartnerId > 0) {
 			whereClasuePayment += "AND C_BPartner_ID = ? ";
 			paymentFilters.add(businessPartnerId);
+		}
+
+		// Is Receipt (Y = receipts, N = payments)
+		if (!Util.isEmpty(isReceipt, true)) {
+			if ("Y".equalsIgnoreCase(isReceipt)) {
+				whereClasuePayment += "AND IsReceipt = 'Y' ";
+			} else if ("N".equalsIgnoreCase(isReceipt)) {
+				whereClasuePayment += "AND IsReceipt = 'N' ";
+			}
+		}
+
+		// Is Multi Payment Match (EXISTS against C_BankStatementLineMatch)
+		if (isMultiPaymentMatch) {
+			whereClasuePayment += "AND EXISTS("
+				+ "SELECT 1 FROM C_BankStatementLineMatch AS bslm "
+				+ "WHERE bslm.C_Payment_ID = C_Payment.C_Payment_ID"
+			+ ") ";
+		}
+
+		// Search Value
+		if (!Util.isEmpty(searchValue, true)) {
+			whereClasuePayment += "AND ("
+					+ "UPPER(DocumentNo) LIKE '%' || UPPER(?) || '%' "
+					+ "OR UPPER(Description) LIKE '%' || UPPER(?) || '%' "
+				+ ") "
+			;
+			paymentFilters.add(searchValue);
+			paymentFilters.add(searchValue);
 		}
 
 		Query paymentQuery = new Query(
@@ -128,14 +215,174 @@ public class BankStatementMatchUtil {
 	}
 
 
-	public static Query buildBankMovementQuery(
+
+	public static String buildPaymentSQL(
 		int bankStatementId,
 		int bankAccountId,
-		boolean isMatchedMode,
+		int matchMode,
 		Timestamp dateFrom,
 		Timestamp dateTo,
 		BigDecimal paymentAmountFrom,
-		BigDecimal paymentAmountTo
+		BigDecimal paymentAmountTo,
+		int businessPartnerId,
+		String searchValue,
+		String isReceipt,
+		boolean isMultiPaymentMatch,
+		List<Object> parametersList
+	) {
+		StringBuffer sql = new StringBuffer(
+			"SELECT p.*, "
+				+ "EXISTS("
+					+ "SELECT 1 FROM I_BankStatement ibs "
+					+ "WHERE ibs.C_Payment_ID = p.C_Payment_ID "
+						// + "AND COALESCE(ibs.IsMatched, 'N') = 'Y' "
+				+ ") AS IsMatched, "
+				+ "EXISTS("
+					+ "SELECT 1 FROM I_BankStatement ibs "
+					+ "WHERE ibs.C_Payment_ID = p.C_Payment_ID "
+						+ "AND COALESCE(ibs.IsManualMatch, 'N') = 'Y' "
+				+ ") AS IsManualMatch, "
+				+ "EXISTS("
+					+ "SELECT 1 FROM C_BankStatementLineMatch bslm "
+					+ "WHERE bslm.C_Payment_ID = p.C_Payment_ID"
+				+ ") AS IsMultiPaymentMatch "
+			+ "FROM C_Payment p "
+			+ "WHERE "
+				+ "p.C_BankAccount_ID = ? "
+				+ "AND p.DocStatus NOT IN('IP', 'DR') "
+				+ "AND p.IsReconciled = 'N' "
+		);
+
+		parametersList.add(bankAccountId);
+
+		if (bankStatementId > 0) {
+			sql.append(
+				"AND NOT EXISTS("
+					+ "SELECT 1 FROM C_BankStatement AS bs "
+					+ "INNER JOIN C_BankStatementLine AS bsl "
+						+ "ON bsl.C_BankStatement_ID = bs.C_BankStatement_ID "
+					+ "WHERE bsl.C_Payment_ID = p.C_Payment_ID "
+						+ "AND bs.DocStatus IN('CO', 'CL') "
+					+ "AND bsl.C_BankStatement_ID <> " + bankStatementId
+				+ ") "
+			);
+		}
+
+		//	Match (skipped when isMultiPaymentMatch=true; the EXISTS filter below covers it)
+		if (!isMultiPaymentMatch) {
+			if (matchMode == MatchMode.MODE_MATCHED_VALUE) {
+				sql.append(
+					"AND ("
+						+ "EXISTS("
+							+ "SELECT 1 "
+							+ "FROM I_BankStatement AS ibs "
+							+ "WHERE ibs.C_Payment_ID = p.C_Payment_ID"
+						+ ") "
+						+ "OR EXISTS("
+							+ "SELECT 1 "
+							+ "FROM C_BankStatementLineMatch AS bslm "
+							+ "WHERE bslm.C_Payment_ID = p.C_Payment_ID"
+						+ ") "
+					+ ") "
+				);
+			} else if (matchMode == MatchMode.MODE_NOT_MATCHED_VALUE) {
+				sql.append(
+					"AND ("
+						+ "NOT EXISTS("
+							+ "SELECT 1 "
+							+ "FROM I_BankStatement AS ibs "
+							+ "WHERE ibs.C_Payment_ID = p.C_Payment_ID "
+								+ "AND COALESCE(ibs.IsManualMatch, 'N') = 'N' "
+						+ ") "
+						+ "AND NOT EXISTS("
+							+ "SELECT 1 "
+							+ "FROM C_BankStatementLineMatch AS bslm "
+							+ "WHERE bslm.C_Payment_ID = p.C_Payment_ID"
+						+ ") "
+					+ ") "
+				);
+			}
+		}
+
+		//	Date Trx
+		if (dateFrom != null) {
+			sql.append("AND p.DateTrx >= ? ");
+			parametersList.add(dateFrom);
+		}
+		if (dateTo != null) {
+			sql.append("AND p.DateTrx <= ? ");
+			parametersList.add(dateTo);
+		}
+
+		//	Amount (negate for payments IsReceipt='N' to match visual display)
+		if (paymentAmountFrom != null) {
+			sql.append("AND (CASE WHEN p.IsReceipt = 'N' THEN -p.PayAmt ELSE p.PayAmt END) >= ? ");
+			parametersList.add(paymentAmountFrom);
+		}
+		if (paymentAmountTo != null) {
+			sql.append("AND (CASE WHEN p.IsReceipt = 'N' THEN -p.PayAmt ELSE p.PayAmt END) <= ? ");
+			parametersList.add(paymentAmountTo);
+		}
+
+		// Business Partner
+		if (businessPartnerId > 0) {
+			sql.append("AND p.C_BPartner_ID = ? ");
+			parametersList.add(businessPartnerId);
+		}
+
+		// Is Receipt (Y = receipts, N = payments)
+		if (!Util.isEmpty(isReceipt, true)) {
+			if ("Y".equalsIgnoreCase(isReceipt)) {
+				sql.append("AND p.IsReceipt = 'Y' ");
+			} else if ("N".equalsIgnoreCase(isReceipt)) {
+				sql.append("AND p.IsReceipt = 'N' ");
+			}
+		}
+
+		// Is Multi Payment Match (EXISTS against C_BankStatementLineMatch)
+		if (isMultiPaymentMatch) {
+			sql.append(
+				"AND EXISTS("
+					+ "SELECT 1 FROM C_BankStatementLineMatch AS bslm "
+					+ "WHERE bslm.C_Payment_ID = p.C_Payment_ID"
+				+ ") "
+			);
+		}
+
+		// Search Value
+		if (!Util.isEmpty(searchValue, true)) {
+			sql.append("AND ("
+				+ "UPPER(p.DocumentNo) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(p.Description) LIKE '%' || UPPER(?) || '%' "
+			+ ") ");
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+		}
+
+		sql.append("ORDER BY p.DateTrx ");
+
+		// role security
+		return MRole.getDefault(Env.getCtx(), false).addAccessSQL(
+			sql.toString(),
+			"p",
+			MRole.SQL_FULLYQUALIFIED,
+			MRole.SQL_RO
+		);
+	}
+
+
+
+	public static Query buildImportBankMovementQuery(
+		int bankStatementId,
+		int bankAccountId,
+		int matchMode,
+		Timestamp dateFrom,
+		Timestamp dateTo,
+		BigDecimal paymentAmountFrom,
+		BigDecimal paymentAmountTo,
+		String searchValue,
+		String isReceipt,
+		boolean isMultiPaymentMatch
 	) {
 		String whereClasueBankStatement = "C_BankAccount_ID = ? ";
 
@@ -143,25 +390,49 @@ public class BankStatementMatchUtil {
 		filterParameters.add(bankAccountId);
 
 		if(bankStatementId > 0) {
-			whereClasueBankStatement += "AND NOT EXISTS(SELECT 1 FROM C_BankStatement bs "
-				+ "INNER JOIN C_BankStatementLine bsl "
-				+ "ON(bsl.C_BankStatement_ID = bs.C_BankStatement_ID) "
-				+ "WHERE bsl.C_BankStatementLine_ID = I_BankStatement.C_BankStatementLine_ID "
-				+ "AND bs.DocStatus IN('CO', 'CL') "
-				+ "AND bsl.C_BankStatement_ID <> " + bankStatementId + ") "
+			whereClasueBankStatement += "AND NOT EXISTS("
+					+ "SELECT 1 FROM C_BankStatement AS bs "
+					+ "INNER JOIN C_BankStatementLine AS bsl "
+					+ "ON(bsl.C_BankStatement_ID = bs.C_BankStatement_ID) "
+					+ "WHERE bsl.C_BankStatementLine_ID = I_BankStatement.C_BankStatementLine_ID "
+					+ "AND bs.DocStatus IN('CO', 'CL') "
+					+ "AND bsl.C_BankStatement_ID <> " + bankStatementId
+				+ ") "
+			;
+			//	Only show lines still pending to import or that belong to the statement
+			//	being reconciled; hides imported lines left over from a deleted statement
+			//	(C_BankStatement_ID null/other) that would otherwise duplicate movements.
+			whereClasueBankStatement += "AND ("
+					+ "COALESCE(I_IsImported, 'N') = 'N' "
+					+ "OR C_BankStatement_ID = " + bankStatementId
+				+ ") "
 			;
 		}
 
-		//	Match
-		// if(isMatchedMode) {
-		// 	whereClasueBankStatement += "AND (C_Payment_ID IS NOT NULL "
-		// 		+ "OR C_BPartner_ID IS NOT NULL "
-		// 		+ "OR C_Invoice_ID IS NOT NULL) ";
-		// } else {
-		// 	whereClasueBankStatement += "AND (C_Payment_ID IS NULL "
-		// 		+ "AND C_BPartner_ID IS NULL "
-		// 		+ "AND C_Invoice_ID IS NULL) ";
-		// }
+		//	Match (skipped when isMultiPaymentMatch=true; the COALESCE filter below covers it)
+		if (!isMultiPaymentMatch) {
+			if(matchMode == MatchMode.MODE_MATCHED_VALUE) {
+				whereClasueBankStatement += "AND ("
+					+ "(COALESCE(IsManualMatch, 'N') = 'Y' AND COALESCE(IsMatched, 'N') = 'Y') "
+					+ "OR COALESCE(IsMultiPaymentMatch, 'N') = 'Y' "
+					+ "OR (C_Payment_ID IS NOT NULL "
+					+ "OR C_BPartner_ID IS NOT NULL "
+					+ "OR C_Invoice_ID IS NOT NULL) "
+					+ ") "
+				;
+			} else if (matchMode == MatchMode.MODE_NOT_MATCHED_VALUE) {
+				whereClasueBankStatement += "AND ("
+					+ "(COALESCE(IsManualMatch, 'N') = 'Y' OR COALESCE(IsMatched, 'N') = 'N') "
+					+ "AND COALESCE(IsMultiPaymentMatch, 'N') = 'N' "
+					+ "OR (C_Payment_ID IS NULL "
+					+ "AND C_BPartner_ID IS NULL "
+					+ "AND C_Invoice_ID IS NULL) "
+					+ ") "
+				;
+			} else {
+				// all mode MatchMode.MODE_ALL
+			}
+		}
 
 		//	Date Trx
 		if (dateFrom != null) {
@@ -183,7 +454,31 @@ public class BankStatementMatchUtil {
 			filterParameters.add(paymentAmountTo);
 		}
 
-		Query paymentQuery = new Query(
+		// Is Receipt (Y = receipts/positive TrxAmt, N = payments/negative TrxAmt)
+		if (!Util.isEmpty(isReceipt, true)) {
+			if ("Y".equalsIgnoreCase(isReceipt)) {
+				whereClasueBankStatement += "AND TrxAmt >= 0 ";
+			} else if ("N".equalsIgnoreCase(isReceipt)) {
+				whereClasueBankStatement += "AND TrxAmt < 0 ";
+			}
+		}
+
+		// Is Multi Payment Match
+		if (isMultiPaymentMatch) {
+			whereClasueBankStatement += "AND COALESCE(IsMultiPaymentMatch, 'N') = 'Y' ";
+		}
+
+		// Search Value
+		if (!Util.isEmpty(searchValue, true)) {
+			whereClasueBankStatement += "AND ("
+				+ "UPPER(ReferenceNo) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(LineDescription) LIKE '%' || UPPER(?) || '%' "
+			+ ") ";
+			filterParameters.add(searchValue);
+			filterParameters.add(searchValue);
+		}
+
+		Query importBankMovementQuery = new Query(
 			Env.getCtx(),
 			I_I_BankStatement.Table_Name,
 			whereClasueBankStatement,
@@ -195,13 +490,15 @@ public class BankStatementMatchUtil {
 			.setOrderBy(I_I_BankStatement.COLUMNNAME_StatementLineDate)
 		;
 
-		return paymentQuery;
+		return importBankMovementQuery;
 	}
+
 
 
 	public static Query buildResultMovementsQuery(
 		int bankStatementId,
 		int bankAccountId,
+		int matchMode,
 		Timestamp dateFrom,
 		Timestamp dateTo,
 		BigDecimal paymentAmountFrom,
@@ -210,13 +507,14 @@ public class BankStatementMatchUtil {
 		String whereClasueBankStatement = "C_BankAccount_ID = ? ";
 
 		if(bankStatementId > 0) {
-			whereClasueBankStatement += "AND NOT EXISTS(SELECT 1 FROM C_BankStatement bs "
-				+ "INNER JOIN C_BankStatementLine bsl "
+			whereClasueBankStatement += "AND NOT EXISTS("
+				+ "SELECT 1 FROM C_BankStatement AS bs "
+				+ "INNER JOIN C_BankStatementLine AS bsl "
 				+ "ON(bsl.C_BankStatement_ID = bs.C_BankStatement_ID) "
 				+ "WHERE bsl.C_Payment_ID = I_BankStatement.C_Payment_ID "
 				+ "AND bs.DocStatus IN('CO', 'CL') "
-				+ "AND bsl.C_BankStatement_ID <> " + bankStatementId + ") "
-			;
+				+ "AND bsl.C_BankStatement_ID <> " + bankStatementId 
+			+ ") ";
 		}
 
 		ArrayList<Object> filterParameters = new ArrayList<Object>();
@@ -242,7 +540,7 @@ public class BankStatementMatchUtil {
 			filterParameters.add(paymentAmountTo);
 		}
 
-		Query paymentQuery = new Query(
+		Query resultMovementsQuery = new Query(
 			Env.getCtx(),
 			I_I_BankStatement.Table_Name,
 			whereClasueBankStatement,
@@ -254,7 +552,59 @@ public class BankStatementMatchUtil {
 			.setOrderBy(I_I_BankStatement.COLUMNNAME_StatementLineDate)
 		;
 
-		return paymentQuery;
+		return resultMovementsQuery;
+	}
+
+
+
+	public static List<MBankStatementLineMatch> getLineMatchesByImportedMovement(int importedMovementId) {
+		return new Query(
+			Env.getCtx(),
+			I_C_BankStatementLineMatch.Table_Name,
+			"I_BankStatement_ID = ?",
+			null
+		)
+			.setParameters(importedMovementId)
+			.setClient_ID()
+			.setOrderBy(I_C_BankStatementLineMatch.COLUMNNAME_MatchDate)
+			.list()
+		;
+	}
+
+
+
+	public static List<MBankStatementLineMatch> getLineMatchesByBankStatementLine(int bankStatementLineId) {
+		return new Query(
+			Env.getCtx(),
+			I_C_BankStatementLineMatch.Table_Name,
+			"C_BankStatementLine_ID = ?",
+			null
+		)
+			.setParameters(bankStatementLineId)
+			.setClient_ID()
+			.setOrderBy(I_C_BankStatementLineMatch.COLUMNNAME_MatchDate)
+			.list()
+		;
+	}
+
+
+
+	public static int deleteLineMatchesByImportedMovement(int importedMovementId) {
+		final String sql = "DELETE FROM C_BankStatementLineMatch WHERE I_BankStatement_ID = ?";
+		return DB.executeUpdate(sql, importedMovementId, null);
+	}
+
+
+
+	public static int deleteLineMatchesByImportedMovements(List<Integer> importedMovementIds) {
+		if (importedMovementIds == null || importedMovementIds.isEmpty()) {
+			return 0;
+		}
+		int totalDeleted = 0;
+		for (int importedMovementId : importedMovementIds) {
+			totalDeleted += deleteLineMatchesByImportedMovement(importedMovementId);
+		}
+		return totalDeleted;
 	}
 
 }

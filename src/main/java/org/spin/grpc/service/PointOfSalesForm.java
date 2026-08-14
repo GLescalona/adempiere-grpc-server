@@ -22,7 +22,13 @@ import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.adempiere.core.domains.models.I_AD_PrintFormatItem;
@@ -111,7 +117,11 @@ import org.spin.pos.service.pos.POS;
 import org.spin.pos.service.product.ProductServiceLogic;
 import org.spin.pos.service.pos.AccessManagement;
 import org.spin.pos.service.seller.SellerServiceLogic;
-import org.spin.pos.util.*;
+import org.spin.pos.util.ColumnsAdded;
+import org.spin.pos.util.OrderConverUtil;
+import org.spin.pos.util.POSConvertUtil;
+import org.spin.pos.util.TicketHandler;
+import org.spin.pos.util.TicketResult;
 import org.spin.service.grpc.authentication.SessionManager;
 import org.spin.service.grpc.util.base.RecordUtil;
 import org.spin.service.grpc.util.db.CountUtil;
@@ -3549,6 +3559,7 @@ public class PointOfSalesForm extends StoreImplBase {
 			)
 		;
 
+		Map<Integer, Boolean> documentTypesMap = new HashMap<Integer, Boolean>();
 		query
 			.setLimit(limit, offset)
 			.list()
@@ -3558,36 +3569,28 @@ public class PointOfSalesForm extends StoreImplBase {
 					documentTypeId = availableDocumentType.get_ValueAsInt("POSReturnDocumentType_ID");
 				}
 				if (documentTypeId <= 0) {
-					// is empty, break loop
+					// is empty, skip
+					return;
+				}
+				if (documentTypesMap.containsKey(documentTypeId)) {
+					// already exists, skip
 					return;
 				}
 				MDocType documentType = MDocType.get(Env.getCtx(), documentTypeId);
+				if (documentType == null || documentType.getC_DocType_ID() <= 0) {
+					// is empty, skip
+					return;
+				}
 
-				AvailableDocumentType.Builder builder = AvailableDocumentType.newBuilder()
-					.setId(
-						documentType.getC_DocType_ID()
-					)
-					.setKey(
-						TextManager.getValidString(
-							documentType.getName()
-						)
-					)
-					.setName(
-						TextManager.getValidString(
-							documentType.getPrintName()
-						)
-					)
-					.setIsPosRequiredPin(
-						availableDocumentType.get_ValueAsBoolean(I_C_POS.COLUMNNAME_IsPOSRequiredPIN)
-					)
-					.setIsActive(
-						documentType.isActive() && availableDocumentType.get_ValueAsBoolean("IsActive")
-					)
-					.setIsReturnDocument(isOnlyRMA)
-				;
+				AvailableDocumentType.Builder builder = org.spin.pos.service.pos.POSConvertUtil.convertAvailableDocumentType(
+					availableDocumentType,
+					isOnlyRMA
+				);
 				builderList.addDocumentTypes(
 					builder
 				);
+
+				documentTypesMap.put(documentTypeId, true);
 			})
 		;
 		//	
@@ -3880,11 +3883,6 @@ public class PointOfSalesForm extends StoreImplBase {
 		if(request.getPosId() <= 0) {
 			throw new AdempiereException("@C_POS_ID@ @NotFound@");
 		}
-		ListPaymentsResponse.Builder builder = ListPaymentsResponse.newBuilder();
-		String nexPageToken = null;
-		int pageNumber = LimitUtil.getPageNumber(SessionManager.getSessionUuid(), request.getPageToken());
-		int limit = LimitUtil.getPageSize(request.getPageSize());
-		int offset = (pageNumber - 1) * limit;
 
 		//	Dynamic where clause
 		StringBuffer whereClause = new StringBuffer();
@@ -3915,28 +3913,44 @@ public class PointOfSalesForm extends StoreImplBase {
 			whereClause.append("C_Payment.IsReceipt = 'Y'");
 		}
 		//	Get Product list
-		Query query = new Query(Env.getCtx(), I_C_Payment.Table_Name, whereClause.toString(), null)
-				.setParameters(parameters)
-				.setClient_ID()
-				.setOnlyActiveRecords(true);
-		int count = query.count();
-		query
-		.setLimit(limit, offset)
-		.<MPayment>list()
-		.forEach(payment -> {
-			Payment.Builder paymentBuilder = PaymentConvertUtil.convertPayment(
-				payment
-			);
-			builder.addPayments(paymentBuilder);
-		});
-		builder.setRecordCount(count);
+		Query query = new Query(
+			Env.getCtx(),
+			I_C_Payment.Table_Name,
+			whereClause.toString(),
+			null
+		)
+			.setParameters(parameters)
+			.setClient_ID()
+			.setOnlyActiveRecords(true)
+		;
+
+		final int pageNumber = LimitUtil.getPageNumber(SessionManager.getSessionUuid(), request.getPageToken());
+		final int limit = LimitUtil.getPageSize(request.getPageSize());
+		final int offset = (pageNumber - 1) * limit;
+		final int count = query.count();
 		//	Set page token
+		String nexPageToken = null;
 		if(LimitUtil.isValidNextPageToken(count, offset, limit)) {
 			nexPageToken = LimitUtil.getPagePrefix(SessionManager.getSessionUuid()) + (pageNumber + 1);
 		}
-		builder.setNextPageToken(
-			TextManager.getValidString(nexPageToken)
-		);
+
+		ListPaymentsResponse.Builder builder = ListPaymentsResponse.newBuilder()
+			.setRecordCount(count)
+			.setNextPageToken(
+				TextManager.getValidString(nexPageToken)
+			)
+		;
+
+		query
+			.setLimit(limit, offset)
+			.<MPayment>list()
+			.forEach(payment -> {
+				Payment.Builder paymentBuilder = PaymentConvertUtil.convertPayment(
+					payment
+				);
+				builder.addPayments(paymentBuilder);
+			})
+		;
 		return builder;
 	}
 	
@@ -4480,14 +4494,13 @@ public class PointOfSalesForm extends StoreImplBase {
 		}
 		log.fine( "CPOS.setC_BPartner_ID=" + businessPartner.getC_BPartner_ID());
 		businessPartner.set_TrxName(transactionName);
+		int oldPriceListId = salesOrder.getM_PriceList_ID();
 		salesOrder.setBPartner(businessPartner);
+		//	Payment Term from POS (overrides the one derived from the Business Partner / default payment term)
+		OrderUtil.setPaymentTermFromPOS(pos, salesOrder);
 		boolean isKeepPriceListCustomer = AccessManagement.getBooleanValueFromPOS(pos, businessPartnerId, ColumnsAdded.COLUMNNAME_IsKeepPriceFromCustomer);
 		if(!isKeepPriceListCustomer && businessPartner.getM_PriceList_ID() > 0) {
-			MPriceList businesPartnerPriceList = MPriceList.get(salesOrder.getCtx(), businessPartner.getM_PriceList_ID(), transactionName);
-			MPriceList currentPriceList = MPriceList.get(salesOrder.getCtx(), pos.getM_PriceList_ID(), transactionName);
-			if(currentPriceList.getC_Currency_ID() != businesPartnerPriceList.getC_Currency_ID()) {
-				salesOrder.setM_PriceList_ID(currentPriceList.getM_PriceList_ID());
-			}
+			salesOrder.setM_PriceList_ID(oldPriceListId); //keeps original price List set by POS
 		}
 		//	
 		MBPartnerLocation [] partnerLocations = businessPartner.getLocations(true);

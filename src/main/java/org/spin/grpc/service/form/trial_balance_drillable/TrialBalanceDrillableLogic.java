@@ -50,6 +50,7 @@ import org.spin.backend.grpc.form.trial_balance_drillable.ListUser1Request;
 import org.spin.backend.grpc.form.trial_balance_drillable.Period;
 import org.spin.base.util.ReferenceUtil;
 import org.spin.grpc.service.field.field_management.FieldManagementLogic;
+import org.spin.service.grpc.util.db.OrderByUtil;
 import org.spin.service.grpc.util.db.ParameterUtil;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
@@ -221,6 +222,12 @@ public class TrialBalanceDrillableLogic {
 			0
 		);
 
+		// The C_Period reference orders by the display name (alphabetical);
+		// force chronological order by the period start date.
+		if (reference != null && reference.Query != null && reference.Query.trim().length() > 0) {
+			reference.Query = OrderByUtil.removeOrderBy(reference.Query) + " ORDER BY C_Period.StartDate ";
+		}
+
 		ListLookupItemsResponse.Builder builderList = FieldManagementLogic.listLookupItems(
 			reference,
 			request.getContextAttributes(),
@@ -337,7 +344,7 @@ public class TrialBalanceDrillableLogic {
 		sql.append( " COALESCE(SUM(CASE WHEN (DateAcct  BETWEEN (? :: date) AND (? :: date)) AND PostingType = 'B' THEN (AmtacctDr-AmtacctCr) ELSE 0 END), 0) AS total2,");
 		sql.append( " COALESCE(Sum(CASE WHEN ((DateAcct  >= (? :: date) OR ev.AccountType NOT IN ('E','R')) AND DateAcct  <= (? :: date)) AND PostingType='A' THEN (AmtacctDr-AmtacctCr) ELSE 0 END), 0) AS total3,");
 		sql.append( " COALESCE(Sum(CASE WHEN ((DateAcct  >= (? :: date) OR ev.AccountType NOT IN ('E','R')) AND DateAcct  <= (? :: date)) AND PostingType='B' THEN (AmtacctDr-AmtacctCr) ELSE 0 END), 0) AS total4,");
-		sql.append(" fs.User1_ID, ");
+		sql.append(" fs.User1_ID, "); // u1.User1_ID
 		sql.append(" u1.Value AS userlist1 ");
 		sql.append(" FROM  Fact_Acct_Summary fs"
 		+ " INNER JOIN C_ElementValue ev ON fs.Account_ID = ev.C_ElementValue_ID AND fs.AD_Client_ID = ev.AD_Client_ID ");
@@ -402,9 +409,10 @@ public class TrialBalanceDrillableLogic {
 			}
 		}
 		sql.append(" GROUP BY fs.Account_ID,ev.value,ev.name, u1.value ");
+		sql.append(", fs.User1_ID "); // u1.User1_ID
 		
 		// calculate prior year earnings if all accounts selected
-		if (accountingFromValue == null && accountingFromValue == null) {
+		if (accountingFromValue == null && accountingToValue == null) {
 			filterParametersList.add(yearFrom.getStartDate());
 			filterParametersList.add(yearFrom.getStartDate());
 
@@ -415,7 +423,7 @@ public class TrialBalanceDrillableLogic {
 			sql.append(" 0 AS total2,");
 			sql.append(" COALESCE(Sum(CASE WHEN DateAcct  < (? :: date) AND ev.AccountType IN ('E','R') AND PostingType='A' THEN (AmtacctDr-AmtacctCr) ELSE 0 END), 0) AS total3,");
 			sql.append(" COALESCE(Sum(CASE WHEN DateAcct  < (? :: date) AND ev.AccountType IN ('E','R') AND PostingType='B' THEN (AmtacctDr-AmtacctCr) ELSE 0 END), 0) AS total4,");
-			// sql.append(" 0 AS User1_ID, ");
+			sql.append(" 0 AS User1_ID, ");
 			sql.append(" NULL AS userlist1 ");
 			sql.append(" FROM  Fact_Acct_Summary fs"
 				+ " INNER JOIN C_ElementValue ev ON fs.Account_ID = ev.C_ElementValue_ID AND fs.AD_Client_ID = ev.AD_Client_ID ");

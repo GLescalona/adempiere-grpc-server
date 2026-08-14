@@ -49,7 +49,7 @@ import org.spin.service.grpc.authentication.SessionManager;
 import org.spin.service.grpc.util.db.LimitUtil;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
-import org.spin.service.grpc.util.value.ValueManager;
+import org.spin.service.grpc.util.value.TimeManager;
 
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
@@ -138,7 +138,7 @@ public class NoticeManagement extends NoticeManagementImplBase {
 				)
 			)
 			.setCreated(
-				ValueManager.getProtoTimestampFromTimestamp(
+				TimeManager.getProtoTimestampFromTimestamp(
 					notice.getCreated()
 				)
 			)
@@ -266,7 +266,7 @@ public class NoticeManagement extends NoticeManagementImplBase {
 		;
 
 		queryNotices
-			// .setLimit(limit, offset)
+			.setLimit(limit, offset)
 			.getIDsAsList()
 			.forEach(noticeId -> {
 				Notice.Builder builder = convertNotice(noticeId);
@@ -376,7 +376,7 @@ public class NoticeManagement extends NoticeManagementImplBase {
 		;
 
 		queryNotices
-			// .setLimit(limit, offset)
+			.setLimit(limit, offset)
 			.getIDsAsList()
 			.forEach(userId -> {
 				User.Builder builder = convertUser(userId);

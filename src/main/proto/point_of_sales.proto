@@ -1709,6 +1709,7 @@ message AvailableDocumentType {
 	bool is_active = 5;
 	bool is_pos_required_pin = 6;
 	bool is_return_document = 7;
+	bool is_generate_manual_document = 8;
 }
 
 
@@ -1906,6 +1907,7 @@ message ListProductPriceRequest {
 	string valid_from = 10;
 	int32 price_list_id = 11;
 	int32 warehouse_id = 12;
+	string product_code_vendor = 13;
 }
 
 

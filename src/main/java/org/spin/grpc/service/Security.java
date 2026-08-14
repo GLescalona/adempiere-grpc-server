@@ -17,6 +17,7 @@ package org.spin.grpc.service;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.Hashtable;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -99,7 +100,10 @@ import org.spin.base.util.ContextManager;
 import org.spin.grpc.service.core_functionality.CoreFunctionalityConvert;
 import org.spin.model.MADAttachmentReference;
 import org.spin.model.MADToken;
+import org.spin.service.grpc.authentication.AuthorizationServerInterceptor;
+import org.spin.service.grpc.authentication.KeycloakSessionHandler;
 import org.spin.service.grpc.authentication.SessionManager;
+import org.spin.service.grpc.authentication.TokenTypeDetector;
 import org.spin.service.grpc.util.base.PreferenceUtil;
 import org.spin.service.grpc.util.db.LimitUtil;
 import org.spin.service.grpc.util.value.BooleanManager;
@@ -133,6 +137,12 @@ public class Security extends SecurityImplBase {
 	private CLogger log = CLogger.getCLogger(Security.class);
 	/**	Menu */
 	private static CCache<String, MenuResponse.Builder> menuCache = new CCache<String, MenuResponse.Builder>("Menu_for_User", 30, 0);
+	/**
+	 * Tracks consumed (code|state) pairs from OpenID logins to block replay.
+	 * TTL must exceed the OpenID authorization-code lifetime so a stolen code
+	 * cannot be reused after a legitimate exchange completes.
+	 */
+	private static CCache<String, Boolean> usedOpenIdCredentials = new CCache<String, Boolean>("OpenIDUsedCredentials", 1000, 10);
 
 
 
@@ -241,16 +251,24 @@ public class Security extends SecurityImplBase {
 
 	private Session.Builder setSessionAttribute(SetSessionAttributeRequest request) {
 		Properties context = Env.getCtx();
-		//	Language
+
+		// Collect only the attributes the caller actually sent. The session
+		// keeps the previous values for anything that is not in the
+		// payload, and AD_Preference is not rewritten with stale data.
+		Map<String, String> preferencesToPersist = new LinkedHashMap<>();
+
+		// language
 		String language = Env.getAD_Language(context);
 		if (!Util.isEmpty(request.getLanguage(), true)) {
 			language = SessionManager.getDefaultLanguage(request.getLanguage());
+			preferencesToPersist.put(PreferenceUtil.P_LANGUAGE, language);
 		}
 
 		// warehouse
 		int warehouseId = Env.getContextAsInt(context, "#M_Warehouse_ID");
 		if (request.getWarehouseId() > 0) {
 			warehouseId = request.getWarehouseId();
+			preferencesToPersist.put(PreferenceUtil.P_WAREHOUSE, NumberManager.getIntToString(warehouseId));
 		}
 
 		MSession currentSession = MSession.get(context, false);
@@ -276,10 +294,11 @@ public class Security extends SecurityImplBase {
 			isOpenID
 		);
 
-		// Update session preferences
-		PreferenceUtil.saveSessionPreferences(
-			userId, language, role.getAD_Role_ID(), role.getAD_Client_ID(), currentSession.getAD_Org_ID(), warehouseId
-		);
+		// Update Keycloak session cache (so next request finds new session)
+		updateKeycloakCacheIfNeeded(bearerToken);
+
+		// Persist only what the request brought; no-op when payload is empty.
+		PreferenceUtil.saveSessionPreferences(userId, preferencesToPersist);
 
 		builder.setToken(bearerToken);
 		return builder;
@@ -530,7 +549,7 @@ public class Security extends SecurityImplBase {
 		;
 		//	Get List
 		query
-			.setOrderBy(I_AD_Org.COLUMNNAME_Name)
+			.setOrderBy("AD_Client_ID DESC, Name")
 			// .setLimit(limit, offset)
 			.getIDsAsList() // do not use the list of identifiers because it cannot be instantiated zero (0)
 			// .<MOrg>list()
@@ -577,7 +596,12 @@ public class Security extends SecurityImplBase {
 
 		if(organizationInfo.getCorporateBrandingImage_ID() > 0 && AttachmentUtil.getInstance().isValidForClient(organizationInfo.getAD_Client_ID())) {
 			MClientInfo clientInfo = MClientInfo.get(Env.getCtx(), organizationInfo.getAD_Client_ID());
-			MADAttachmentReference attachmentReference = MADAttachmentReference.getByImageId(Env.getCtx(), clientInfo.getFileHandler_ID(), organizationInfo.getCorporateBrandingImage_ID(), null);
+			MADAttachmentReference attachmentReference = MADAttachmentReference.getByImageId(
+				Env.getCtx(),
+				clientInfo.getFileHandler_ID(),
+				organizationInfo.getCorporateBrandingImage_ID(),
+				null
+			);
 			if(attachmentReference != null
 					&& attachmentReference.getAD_AttachmentReference_ID() > 0) {
 					organizationBuilder.setCorporateBrandingImage(
@@ -707,7 +731,7 @@ public class Security extends SecurityImplBase {
 		// TODO: Fix .setLimit combined with .setApplyAccessFilter and with access record (ROWNUM error)
 		query
 			//.setLimit(limit, offset)
-			.setOrderBy(I_M_Warehouse.COLUMNNAME_Name)
+			.setOrderBy("AD_Client_ID DESC, Name")
 			.getIDsAsList() // do not use the list of identifiers because it cannot be instantiated zero (0)
 			// .<MWarehouse>list()
 			.forEach(warehouseId -> {
@@ -983,7 +1007,20 @@ public class Security extends SecurityImplBase {
 	 * @return
 	 */
 	private Session.Builder createSessionFromOpenID(LoginOpenIDRequest request) {
-		MUser validUser = OpenIDUtil.getUserAuthenticated(request.getCodeParameter(), request.getStateParameter());
+		final String code = request.getCodeParameter();
+		final String state = request.getStateParameter();
+		if (Util.isEmpty(code, true) || Util.isEmpty(state, true)) {
+			throw new AdempiereException("@FillMandatory@ code/state");
+		}
+		// OpenID authorization codes are single-use by spec. Mark the (code, state)
+		// pair as consumed before delegating to OpenIDUtil so concurrent or replayed
+		// exchanges are rejected even if the IdP would still accept them.
+		final String replayKey = code + "|" + state;
+		if (usedOpenIdCredentials.putIfAbsent(replayKey, Boolean.TRUE) != null) {
+			log.warning("OpenID code/state replay blocked");
+			throw new AdempiereException("@Invalid@ @AD_Token_ID@");
+		}
+		MUser validUser = OpenIDUtil.getUserAuthenticated(code, state);
 		if(validUser == null) {
 			throw new AdempiereException("@AD_User_ID@ / @AD_Role_ID@ / @AD_Org_ID@ @NotFound@");
 		}
@@ -1037,6 +1074,9 @@ public class Security extends SecurityImplBase {
 		if (roleId < 0) {
 			throw new AdempiereException("@AD_User_ID@ / @AD_Role_ID@ / @AD_Org_ID@ @NotFound@");
 		}
+		// if (roleId == 0) {
+		// 	roleId = SessionManager.getDefaultRoleId(userId);
+		// }
 		MRole role = MRole.get(context, roleId);
 
 		// Get organization
@@ -1046,6 +1086,7 @@ public class Security extends SecurityImplBase {
 			if (!role.isOrgAccess(organizationId, true)) {
 				// invlaid organization from role
 				organizationId = -1;
+				log.warning("Invalid organization (" + organizationId + ") from role (" + roleId + ") access.");
 			}
 		}
 		if (organizationId < 0) {
@@ -1060,9 +1101,18 @@ public class Security extends SecurityImplBase {
 		int warehouseId = -1;
 		if (request.getWarehouseId() >= 0) {
 			warehouseId = request.getWarehouseId();
+			if (!SessionManager.isWarehouseAccess(organizationId, warehouseId)) {
+				// invlaid warehouse from organization
+				warehouseId = -1;
+				log.warning("Invalid warehouse (" + warehouseId + ") from organization (" + organizationId + ") allocation.");
+			}
 		}
 		if (warehouseId < 0) {
-			warehouseId = 0;
+			warehouseId = SessionManager.getDefaultWarehouseId(organizationId);
+			if (warehouseId < 0) {
+				// TODO: Verify it access
+				warehouseId = 0;
+			}
 		}
 
 		// Default preference values
@@ -1078,6 +1128,7 @@ public class Security extends SecurityImplBase {
 		if (currentSession.get_ColumnIndex(I_AD_User_Authentication.COLUMNNAME_AD_User_Authentication_ID) >= 0) {
 			isOpenID = currentSession.get_ValueAsInt(I_AD_User_Authentication.COLUMNNAME_AD_User_Authentication_ID) > 0;
 		}
+		final int previousRoleId = currentSession.getAD_Role_ID();
 		final String bearerToken = SessionManager.createSessionAndGetToken(
 			currentSession.getWebSession(),
 			language,
@@ -1088,13 +1139,35 @@ public class Security extends SecurityImplBase {
 			isOpenID
 		);
 		builder.setToken(bearerToken);
-		// Logout
+		// Mark the old AD_Session as Processed='Y' BEFORE updating the local
+		// Keycloak cache. Other JVMs (e.g. the report-engine) only learn about
+		// the role switch by hitting a cached AD_Session_ID, loading it, and
+		// seeing isProcessed()=true — so the DB write must commit first.
 		logoutSession(LogoutRequest.newBuilder().build());
+		// Now point this JVM's Keycloak sid → AD_Session_ID cache to the new session
+		updateKeycloakCacheIfNeeded(bearerToken);
+		// Drop cached MRole entries so the next access-SQL build uses the new tenant
+		MRole.removeFromCache(previousRoleId, userId);
+		MRole.removeFromCache(roleId, userId);
 
-		// Update session preferences
-		PreferenceUtil.saveSessionPreferences(
-			userId, language, roleId, role.getAD_Client_ID(), organizationId, warehouseId
-		);
+		// Update session preferences — failures here must not silently corrupt
+		// the Keycloak resolve path (which reads language/warehouse from MPreference)
+		try {
+			PreferenceUtil.saveSessionPreferences(
+				userId,
+				language,
+				roleId,
+				role.getAD_Client_ID(),
+				organizationId,
+				warehouseId
+			);
+		} catch (Exception e) {
+			log.warning("Failed to persist session preferences after change-role"
+				+ " (userId=" + userId + " roleId=" + roleId
+				+ " clientId=" + role.getAD_Client_ID()
+				+ " orgId=" + organizationId
+				+ " warehouseId=" + warehouseId + "): " + e.getMessage());
+		}
 
 		// Return session
 		return builder;
@@ -1240,16 +1313,68 @@ public class Security extends SecurityImplBase {
 		return builder;
 	}
 
+
 	/**
-	 * Logout session
+	 * If the current request was authenticated with a Keycloak token,
+	 * update the Keycloak sid → AD_Session_ID cache so the next request
+	 * picks up the new session (after change-role or set-session-attribute).
+	 *
+	 * @param bearerToken the new local JWT returned by createSessionAndGetToken
+	 */
+	private void updateKeycloakCacheIfNeeded(String bearerToken) {
+		String originalToken = AuthorizationServerInterceptor.ORIGINAL_TOKEN.get();
+		if (originalToken == null) {
+			return;
+		}
+		if (TokenTypeDetector.detect(originalToken) != TokenTypeDetector.TokenType.KEYCLOAK) {
+			return;
+		}
+		String keycloakSid = KeycloakSessionHandler.extractSessionId(originalToken);
+		if (keycloakSid == null || keycloakSid.isBlank()) {
+			return;
+		}
+		int newSessionId = extractSessionIdFromBearerToken(bearerToken);
+		if (newSessionId <= 0) {
+			return;
+		}
+		KeycloakSessionHandler.updateSessionCache(keycloakSid, newSessionId);
+	}
+
+	/**
+	 * Extract AD_Session_ID from a local JWT bearer token (jti claim).
+	 */
+	private int extractSessionIdFromBearerToken(String token) {
+		try {
+			String[] parts = token.split("\\.");
+			if (parts.length != 3) {
+				return -1;
+			}
+			String payload = new String(java.util.Base64.getUrlDecoder().decode(parts[1]));
+			com.google.gson.JsonObject claims = com.google.gson.JsonParser.parseString(payload).getAsJsonObject();
+			if (claims.has("jti") && !claims.get("jti").isJsonNull()) {
+				return Integer.parseInt(claims.get("jti").getAsString());
+			}
+		} catch (Exception e) {
+			log.warning("Could not extract session ID from bearer token: " + e.getMessage());
+		}
+		return -1;
+	}
+
+
+	/**
+	 * Get session info
 	 * @param request
 	 * @return
 	 */
 	private SessionInfo.Builder getSessionInfo(SessionInfoRequest request) {
 		Properties context = Env.getCtx();
 		MSession session = MSession.get(context, false);
-		//	Load default preference values
-		SessionManager.loadDefaultSessionValues(context, Env.getAD_Language(context));
+		//	Default preference values are already loaded per-request by the auth interceptor
+		//	(SessionManager.getSessionFromToken / Keycloak resolveSession -> loadDefaultSessionValues),
+		//	so we must not reload them here: doing so repeated a full AcctSchema/Preference/default-values
+		//	pass (~10-20 ms) on every session-info reload.
+		// SessionManager.loadDefaultSessionValues(context, Env.getAD_Language(context));
+
 		//	Session values
 		SessionInfo.Builder builder = SessionInfo.newBuilder();
 		builder.setId(
@@ -1959,11 +2084,7 @@ public class Security extends SecurityImplBase {
 
 		// new UI
 		if (menu.get_ColumnIndex("WebPath") >= 0 && !Util.isEmpty(menu.get_ValueAsString("WebPath"))) {
-			final String targetPath = getTargetPath(
-				menu.get_ValueAsString("WebPath"),
-				menu.get_ValueAsInt("AD_Module_ID"),
-				menu.get_ValueAsInt("AD_SubModule_ID")
-			);
+			final String targetPath = getTargetPath(menu);
 			builder.setTargetPath(
 					TextManager.getValidString(targetPath)
 				)
@@ -1988,13 +2109,29 @@ public class Security extends SecurityImplBase {
 		return builder;
 	}
 
-	private String getTargetPath(String webPath, int moduleId, int subModuleId) {
+	private String getTargetPath(MMenu menu) {
+		final String webPath = menu.get_ValueAsString("WebPath");
 		if (Util.isEmpty(webPath, true) || !webPath.contains("@")) {
 			return webPath;
 		}
 		Properties context = Env.getCtx();
 		final int windowNo = ThreadLocalRandom.current().nextInt(1, 8996 + 1);
 
+		final int menuId = menu.getAD_Menu_ID();
+		final int windowId = menu.getAD_Window_ID();
+		final int processId = menu.getAD_Process_ID();
+		final int browserId = menu.getAD_Browse_ID();
+		final int workflowId = menu.getAD_Workflow_ID();
+		final int formId = menu.getAD_Form_ID();
+		final int moduleId = menu.get_ValueAsInt("AD_Module_ID");
+		final int subModuleId = menu.get_ValueAsInt("AD_SubModule_ID");
+
+		Env.setContext(context, windowNo, "AD_Menu_ID", menuId);
+		Env.setContext(context, windowNo, "AD_Window_ID", windowId);
+		Env.setContext(context, windowNo, "AD_Process_ID", processId);
+		Env.setContext(context, windowNo, "AD_Browse_ID", browserId);
+		Env.setContext(context, windowNo, "AD_Workflow_ID", workflowId);
+		Env.setContext(context, windowNo, "AD_Form_ID", formId);
 		Env.setContext(context, windowNo, "AD_Module_ID", moduleId);
 		Env.setContext(context, windowNo, "AD_SubModule_ID", subModuleId);
 

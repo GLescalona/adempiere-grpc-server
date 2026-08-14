@@ -14,6 +14,7 @@
  ************************************************************************************/
 package org.spin.grpc.service.field.in_out;
 
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -24,23 +25,28 @@ import org.adempiere.exceptions.AdempiereException;
 import org.compiere.model.MInOut;
 import org.compiere.model.MLookupInfo;
 import org.compiere.model.MRole;
-import org.compiere.model.MTable;
 import org.compiere.model.Query;
+import org.compiere.util.DisplayType;
 import org.compiere.util.Env;
 import org.compiere.util.Util;
-import org.spin.backend.grpc.common.Entity;
-import org.spin.backend.grpc.common.ListEntitiesResponse;
-import org.spin.backend.grpc.inout.GetInOutInfoRequest;
-import org.spin.backend.grpc.inout.ListInOutInfoRequest;
-import org.spin.base.db.QueryUtil;
+import org.spin.backend.grpc.common.ListLookupItemsResponse;
+import org.spin.backend.grpc.field.inout.GetInOutInfoRequest;
+import org.spin.backend.grpc.field.inout.InOutInfo;
+import org.spin.backend.grpc.field.inout.ListBusinessPartnersRequest;
+import org.spin.backend.grpc.field.inout.ListInOutInfoRequest;
+import org.spin.backend.grpc.field.inout.ListInOutInfoResponse;
+import org.spin.backend.grpc.field.inout.ListInvoicesRequest;
+import org.spin.backend.grpc.field.inout.ListOrdersRequest;
+import org.spin.backend.grpc.field.inout.ListShippersRequest;
 import org.spin.base.db.WhereClauseUtil;
 import org.spin.base.util.ContextManager;
-import org.spin.base.util.RecordUtil;
 import org.spin.base.util.ReferenceInfo;
+import org.spin.grpc.service.field.field_management.FieldManagementLogic;
 import org.spin.service.grpc.authentication.SessionManager;
-import org.spin.service.grpc.util.db.CountUtil;
 import org.spin.service.grpc.util.db.LimitUtil;
+import org.spin.service.grpc.util.value.BooleanManager;
 import org.spin.service.grpc.util.value.TextManager;
+import org.spin.service.grpc.util.value.TimeManager;
 
 public class InOutInfoLogic {
 
@@ -48,7 +54,140 @@ public class InOutInfoLogic {
 
 
 
-	public static Entity.Builder getInOutInfo(GetInOutInfoRequest request) {
+	public static ListLookupItemsResponse.Builder listBusinessPartners(ListBusinessPartnersRequest request) {
+		String whereClause = "";
+		if (!Util.isEmpty(request.getIsSalesTransaction(), true)) {
+			boolean isSalesTransaction = BooleanManager.getBooleanFromString(
+				request.getIsSalesTransaction()
+			);
+			if (isSalesTransaction) {
+				whereClause = " C_BPartner.IsCustomer = 'Y' ";
+			} else {
+				whereClause = " C_BPartner.IsVendor = 'Y' ";
+			}
+		}
+		// Business Partner
+		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
+			DisplayType.TableDir,
+			0, 0, 0,
+			0,
+			I_M_InOut.COLUMNNAME_C_BPartner_ID, I_M_InOut.Table_Name,
+			0,
+			whereClause
+		);
+
+		ListLookupItemsResponse.Builder builderList = FieldManagementLogic.listLookupItems(
+			reference,
+			null,
+			request.getPageSize(),
+			request.getPageToken(),
+			request.getSearchValue(),
+			true
+		);
+
+		return builderList;
+	}
+
+
+
+	public static ListLookupItemsResponse.Builder listShippers(ListShippersRequest request) {
+		// Shipper
+		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
+			DisplayType.TableDir,
+			0, 0, 0,
+			0,
+			I_M_InOut.COLUMNNAME_M_Shipper_ID, I_M_InOut.Table_Name,
+			0,
+			null
+		);
+
+		ListLookupItemsResponse.Builder builderList = FieldManagementLogic.listLookupItems(
+			reference,
+			null,
+			request.getPageSize(),
+			request.getPageToken(),
+			request.getSearchValue(),
+			true
+		);
+
+		return builderList;
+	}
+
+
+
+	public static ListLookupItemsResponse.Builder listInvoices(ListInvoicesRequest request) {
+		String whereClause = "";
+		if (!Util.isEmpty(request.getIsSalesTransaction(), true)) {
+			boolean isSalesTransaction = BooleanManager.getBooleanFromString(
+				request.getIsSalesTransaction()
+			);
+			if (isSalesTransaction) {
+				whereClause = " C_Invoice.IsSOTrx = 'Y' ";
+			} else {
+				whereClause = " C_Invoice.IsSOTrx = 'N' ";
+			}
+		}
+		// Invoice
+		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
+			DisplayType.TableDir,
+			0, 0, 0,
+			0,
+			I_M_InOut.COLUMNNAME_C_Invoice_ID, I_M_InOut.Table_Name,
+			0,
+			whereClause
+		);
+
+		ListLookupItemsResponse.Builder builderList = FieldManagementLogic.listLookupItems(
+			reference,
+			null,
+			request.getPageSize(),
+			request.getPageToken(),
+			request.getSearchValue(),
+			true
+		);
+
+		return builderList;
+	}
+
+
+
+	public static ListLookupItemsResponse.Builder listOrders(ListOrdersRequest request) {
+		String whereClause = "";
+		if (!Util.isEmpty(request.getIsSalesTransaction(), true)) {
+			boolean isSalesTransaction = BooleanManager.getBooleanFromString(
+				request.getIsSalesTransaction()
+			);
+			if (isSalesTransaction) {
+				whereClause = " C_Order.IsSOTrx = 'Y' ";
+			} else {
+				whereClause = " C_Order.IsSOTrx = 'N' ";
+			}
+		}
+		// Sales Order
+		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
+			DisplayType.TableDir,
+			0, 0, 0,
+			0,
+			I_M_InOut.COLUMNNAME_C_Order_ID, I_M_InOut.Table_Name,
+			0,
+			whereClause
+		);
+
+		ListLookupItemsResponse.Builder builderList = FieldManagementLogic.listLookupItems(
+			reference,
+			null,
+			request.getPageSize(),
+			request.getPageToken(),
+			request.getSearchValue(),
+			true
+		);
+
+		return builderList;
+	}
+
+
+
+	public static InOutInfo.Builder getInOutInfo(GetInOutInfoRequest request) {
 		final int id = request.getId();
 		final String uuid = request.getUuid();
 		final String code = request.getCode();
@@ -81,11 +220,9 @@ public class InOutInfoLogic {
 			.first()
 		;
 
-		// Entity.Builder builder = BusinessPartnerConver.convertBusinessPartner(
-		// 	businessPartner
-		// );
+		InOutInfo.Builder builder = InOutInfoConvert.convertInOutInfo(inOut);
 
-		return Entity.newBuilder();
+		return builder;
 	}
 
 
@@ -95,7 +232,7 @@ public class InOutInfoLogic {
 	 * @param request
 	 * @return
 	 */
-	public static ListEntitiesResponse.Builder listInOutInfo(ListInOutInfoRequest request) {
+	public static ListInOutInfoResponse.Builder listInOutInfo(ListInOutInfoRequest request) {
 		// Fill context
 		Properties context = Env.getCtx();
 		final int windowNo = ThreadLocalRandom.current().nextInt(1, 8996 + 1);
@@ -116,85 +253,257 @@ public class InOutInfoLogic {
 			request.getIsWithoutValidation()
 		);
 
-		//
-		MTable table = MTable.get(Env.getCtx(), Table_Name);
-		StringBuilder sql = new StringBuilder(QueryUtil.getTableQueryWithReferences(table));
-
-		// add where with access restriction
-		String sqlWithRoleAccess = MRole.getDefault(Env.getCtx(), false)
-			.addAccessSQL(
-				sql.toString(),
-				null,
-				MRole.SQL_FULLYQUALIFIED,
-				MRole.SQL_RO
-			);
-
 		StringBuffer whereClause = new StringBuffer(" 1=1 ");
+		List<Object> parametersList = new ArrayList<>();
+
+		// validate is active record
+		if (request.getIsOnlyActiveRecords()) {
+			whereClause.append("AND IsActive = ? ");
+			parametersList.add(true);
+		}
+
 		// validation code of field
 		if (!request.getIsWithoutValidation() && !Util.isEmpty(reference.ValidationCode, true)) {
 			String validationCode = WhereClauseUtil.getWhereRestrictionsWithAlias(
 				Table_Name,
 				reference.ValidationCode
 			);
-			String parsedValidationCode = Env.parseContext(Env.getCtx(), windowNo, validationCode, false);
+			String parsedValidationCode = Env.parseContext(context, windowNo, validationCode, false);
 			if (Util.isEmpty(parsedValidationCode, true)) {
 				throw new AdempiereException(
 					"@AD_Reference_ID@ " + reference.KeyColumn + ", @Code@/@WhereClause@ @Unparseable@"
 				);
 			}
-			whereClause.append(" AND ")
+			whereClause
+				.append(" AND ")
 				.append(parsedValidationCode)
 			;
 		}
 
-		//	For dynamic condition
-		List<Object> params = new ArrayList<>(); // includes on filters criteria
-		String dynamicWhere = WhereClauseUtil.getWhereClauseFromCriteria(request.getFilters(), Table_Name, params);
-		if (!Util.isEmpty(dynamicWhere, true)) {
-			//	Add includes first AND
-			whereClause
-				.append(" AND ")
-				.append("(")
-				.append(dynamicWhere)
-				.append(")")
-			;
+		// URL decode to change characteres and add search value to filter
+		final String searchValue = TextManager.getValidString(
+			TextManager.getDecodeUrl(
+				request.getSearchValue()
+			)
+		).strip();
+		if(!Util.isEmpty(searchValue, true)) {
+			// Search also by related Invoice No and Sales Order No,
+			// each one matched by the delivery header (order) and by the delivery lines.
+			// Correlated EXISTS against M_InOut so the invoice/order lookups are
+			// evaluated only for the already-filtered deliveries (by partner/validation)
+			// instead of full-scanning C_Invoice/C_InvoiceLine/C_Order/C_OrderLine.
+			whereClause.append(" AND ("
+				+ "UPPER(M_InOut.DocumentNo) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(M_InOut.POReference) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(M_InOut.Description) LIKE '%' || UPPER(?) || '%' "
+				// Invoice No -> via the order of the invoice
+				+ "OR EXISTS ("
+				+   "SELECT 1 FROM C_Invoice inv "
+				+   "WHERE inv.C_Order_ID = M_InOut.C_Order_ID "
+				+   "AND UPPER(inv.DocumentNo) LIKE '%' || UPPER(?) || '%'"
+				+ ") "
+				// Invoice No -> via the delivery lines
+				+ "OR EXISTS ("
+				+   "SELECT 1 FROM C_InvoiceLine cil "
+				+   "INNER JOIN M_InOutLine iol ON (iol.M_InOutLine_ID = cil.M_InOutLine_ID) "
+				+   "INNER JOIN C_Invoice inv ON (inv.C_Invoice_ID = cil.C_Invoice_ID) "
+				+   "WHERE iol.M_InOut_ID = M_InOut.M_InOut_ID "
+				+   "AND UPPER(inv.DocumentNo) LIKE '%' || UPPER(?) || '%'"
+				+ ") "
+				// Sales Order No -> via the delivery header
+				+ "OR EXISTS ("
+				+   "SELECT 1 FROM C_Order ord "
+				+   "WHERE ord.C_Order_ID = M_InOut.C_Order_ID "
+				+   "AND UPPER(ord.DocumentNo) LIKE '%' || UPPER(?) || '%'"
+				+ ") "
+				// Sales Order No -> via the delivery lines
+				+ "OR EXISTS ("
+				+   "SELECT 1 FROM M_InOutLine iol "
+				+   "INNER JOIN C_OrderLine ol ON (ol.C_OrderLine_ID = iol.C_OrderLine_ID) "
+				+   "INNER JOIN C_Order ord ON (ord.C_Order_ID = ol.C_Order_ID) "
+				+   "WHERE iol.M_InOut_ID = M_InOut.M_InOut_ID "
+				+   "AND UPPER(ord.DocumentNo) LIKE '%' || UPPER(?) || '%'"
+				+ ") "
+				+ ") "
+			);
+			//	Add parameters
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
 		}
 
-		if (!whereClause.toString().trim().startsWith("AND")) {
-			sqlWithRoleAccess += " AND ";
+		// Document No
+		final String documentNo = TextManager.getDecodeUrl(
+			request.getDocumentNo()
+		);
+		if (!Util.isEmpty(documentNo)) {
+			whereClause.append(" AND UPPER(DocumentNo) LIKE '%' || UPPER(?) || '%' ");
+			parametersList.add(documentNo);
 		}
-		sqlWithRoleAccess += whereClause;
+		// Business Partner
+		final int businessPartnerId = request.getBusinessPartnerId();
+		if (businessPartnerId > 0) {
+			whereClause.append(" AND C_BPartner_ID = ? ");
+			parametersList.add(
+				businessPartnerId
+			);
+		}
+		// Is Sales Transaction
+		if (!Util.isEmpty(request.getIsSalesTransaction(), true)) {
+			whereClause.append(" AND IsSOTrx = ? ");
+			parametersList.add(
+				BooleanManager.getBooleanToString(
+					request.getIsSalesTransaction()
+				)
+			);
+		}
+		// Description
+		final String description = TextManager.getDecodeUrl(
+			request.getDescription()
+		);
+		if (!Util.isEmpty(description)) {
+			whereClause.append(" AND UPPER(Description) LIKE '%' || UPPER(?) || '%' ");
+			parametersList.add(description);
+		}
+		// Date Invoiced
+		final Timestamp dateFrom = TimeManager.getTimestampFromProtoTimestamp(
+			request.getMovementDateFrom()
+		);
+		final Timestamp dateTo = TimeManager.getTimestampFromProtoTimestamp(
+			request.getMovementDateTo()
+		);
+		if (dateFrom != null || dateTo != null) {
+			whereClause.append(" AND ");
+			if (dateFrom != null && dateTo != null) {
+				whereClause.append("TRUNC(MovementDate, 'DD') BETWEEN ? AND ? ");
+				parametersList.add(dateFrom);
+				parametersList.add(dateTo);
+			}
+			else if (dateFrom != null) {
+				whereClause.append("TRUNC(MovementDate, 'DD') >= ? ");
+				parametersList.add(dateFrom);
+			}
+			else {
+				// DateTo != null
+				whereClause.append("TRUNC(MovementDate, 'DD') <= ? ");
+				parametersList.add(dateTo);
+			}
+		}
+		// Purcharse Order Reference
+		final String poReference = TextManager.getDecodeUrl(
+			request.getOrderReference()
+		);
+		if (!Util.isEmpty(poReference)) {
+			whereClause.append(" AND UPPER(POReference) LIKE '%' || UPPER(?) || '%' ");
+			parametersList.add(poReference);
+		}
+		// Shipper
+		final int shipperId = request.getShipperId();
+		if (shipperId > 0) {
+			whereClause.append(" AND M_Shipper_ID = ? ");
+			parametersList.add(
+				shipperId
+			);
+		}
+		// Invoice: match by direct link, by the invoice order (header)
+		// and by the delivery lines invoiced by that invoice.
+		final int invoiceId = request.getInvoiceId();
+		if (invoiceId > 0) {
+			whereClause.append(" AND ("
+				+ "C_Invoice_ID = ? "
+				+ "OR C_Order_ID IN ("
+				+   "SELECT inv.C_Order_ID "
+				+   "FROM C_Invoice AS inv "
+				+   "WHERE inv.C_Invoice_ID = ? AND inv.C_Order_ID IS NOT NULL"
+				+ ") "
+				+ "OR M_InOut_ID IN ("
+				+   "SELECT iol.M_InOut_ID FROM C_InvoiceLine cil "
+				+   "INNER JOIN M_InOutLine iol ON (iol.M_InOutLine_ID = cil.M_InOutLine_ID) "
+				+   "WHERE cil.C_Invoice_ID = ?"
+				+ ") "
+				+ ") "
+			);
+			parametersList.add(invoiceId);
+			parametersList.add(invoiceId);
+			parametersList.add(invoiceId);
+		}
+		// Sales Order: match by the delivery header and by the
+		// delivery lines that belong to a line of that order.
+		final int orderId = request.getOrderId();
+		if (orderId > 0) {
+			whereClause.append(" AND ("
+				+ "C_Order_ID = ? "
+				+ "OR M_InOut_ID IN ("
+				+   "SELECT iol.M_InOut_ID "
+				+   "FROM M_InOutLine AS iol "
+				+   "INNER JOIN C_OrderLine ol ON (ol.C_OrderLine_ID = iol.C_OrderLine_ID) "
+				+   "WHERE ol.C_Order_ID = ?"
+				+ ") "
+				+ ") "
+			);
+			parametersList.add(orderId);
+			parametersList.add(orderId);
+		}
 
-		String parsedSQL = RecordUtil.addSearchValueAndGet(sqlWithRoleAccess, Table_Name, request.getSearchValue(), params);
+		Query query = new Query(
+			context,
+			Table_Name,
+			whereClause.toString(),
+			null
+		)
+			.setClient_ID()
+			.setParameters(parametersList)
+			.setOrderBy("MovementDate DESC, DocumentNo")
+			.setApplyAccessFilter(MRole.SQL_FULLYQUALIFIED, MRole.SQL_RO)
+		;
 
 		//	Get page and count
-		int pageNumber = LimitUtil.getPageNumber(SessionManager.getSessionUuid(), request.getPageToken());
-		int limit = LimitUtil.getPageSize(request.getPageSize());
-		int offset = (pageNumber - 1) * limit;
-		int count = 0;
-
-		ListEntitiesResponse.Builder builder = ListEntitiesResponse.newBuilder();
-		
-		//	Count records
-		count = CountUtil.countRecords(parsedSQL, Table_Name, params);
-		//	Add Row Number
-		parsedSQL = LimitUtil.getQueryWithLimit(parsedSQL, limit, offset);
-		builder = RecordUtil.convertListEntitiesResult(MTable.get(Env.getCtx(), Table_Name), parsedSQL, params);
-		//	
-		builder.setRecordCount(count);
-		//	Set page token
+		final int pageNumber = LimitUtil.getPageNumber(SessionManager.getSessionUuid(), request.getPageToken());
+		final int limit = LimitUtil.getPageSize(request.getPageSize());
+		final int offset = (pageNumber - 1) * limit;
+		final int recordCount = query.count();
+		// Set page token
 		String nexPageToken = null;
-		if(LimitUtil.isValidNextPageToken(count, offset, limit)) {
+		if (LimitUtil.isValidNextPageToken(recordCount, offset, limit)) {
 			nexPageToken = LimitUtil.getPagePrefix(SessionManager.getSessionUuid()) + (pageNumber + 1);
 		}
-		//	Set next page
-		builder.setNextPageToken(
-			TextManager.getValidString(
-				nexPageToken
-			)
-		);
 
-		return builder;
+		ListInOutInfoResponse.Builder responseBuilder = ListInOutInfoResponse.newBuilder()
+			.setRecordCount(recordCount)
+			.setNextPageToken(
+				TextManager.getValidString(
+					nexPageToken
+				)
+			)
+		;
+
+		// Pagination and count stay at delivery level; a delivery related to
+		// several invoices is expanded to one row per invoice
+		query.setLimit(limit, offset)
+			.getIDsAsList()
+			.stream()
+			.forEach(inOutId -> {
+				MInOut inOut = new MInOut(context, inOutId, null);
+				List<Integer> invoiceIds = InOutInfoConvert.getRelatedInvoiceIds(inOut);
+				if (invoiceIds.isEmpty()) {
+					responseBuilder.addRecords(
+						InOutInfoConvert.convertInOutInfo(inOut, 0)
+					);
+				} else {
+					invoiceIds.forEach(relatedInvoiceId ->
+						responseBuilder.addRecords(
+							InOutInfoConvert.convertInOutInfo(inOut, relatedInvoiceId)
+						)
+					);
+				}
+			})
+		;
+
+		return responseBuilder;
 	}
 
 }

@@ -57,7 +57,7 @@ import org.spin.backend.grpc.core_functionality.Warehouse;
 import org.spin.model.MADAttachmentReference;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
-import org.spin.service.grpc.util.value.ValueManager;
+import org.spin.service.grpc.util.value.TimeManager;
 import org.spin.util.AttachmentUtil;
 
 /**
@@ -293,7 +293,7 @@ public class CoreFunctionalityConvert {
 				+ "|" + currencyTo.getISO_Code()
 			)
 			.setValidFrom(
-				ValueManager.getProtoTimestampFromTimestamp(
+				TimeManager.getProtoTimestampFromTimestamp(
 					conversionRate.getValidFrom()
 				)
 			)
@@ -323,7 +323,7 @@ public class CoreFunctionalityConvert {
 		;
 		if(conversionRate.getValidTo() != null) {
 			builder.setValidTo(
-				ValueManager.getProtoTimestampFromTimestamp(
+				TimeManager.getProtoTimestampFromTimestamp(
 					conversionRate.getValidTo()
 				)
 			);
@@ -927,7 +927,12 @@ public class CoreFunctionalityConvert {
 		AtomicReference<String> corporateImageBranding = new AtomicReference<String>();
 		if(organizationInfo.getCorporateBrandingImage_ID() > 0 && AttachmentUtil.getInstance().isValidForClient(organizationInfo.getAD_Client_ID())) {
 			MClientInfo clientInfo = MClientInfo.get(Env.getCtx(), organizationInfo.getAD_Client_ID());
-			MADAttachmentReference attachmentReference = MADAttachmentReference.getByImageId(Env.getCtx(), clientInfo.getFileHandler_ID(), organizationInfo.getCorporateBrandingImage_ID(), null);
+			MADAttachmentReference attachmentReference = MADAttachmentReference.getByImageId(
+				Env.getCtx(),
+				clientInfo.getFileHandler_ID(),
+				organizationInfo.getCorporateBrandingImage_ID(),
+				null
+			);
 			if(attachmentReference != null
 					&& attachmentReference.getAD_AttachmentReference_ID() > 0) {
 				corporateImageBranding.set(attachmentReference.getFileName());

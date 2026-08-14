@@ -15,8 +15,13 @@
 package org.spin.grpc.service.form.bank_statement_match;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+
+import java.util.List;
 
 import org.adempiere.core.domains.models.I_AD_Ref_List;
+import org.adempiere.core.domains.models.I_C_BankStatementLineMatch;
 import org.adempiere.core.domains.models.X_C_BankStatement;
 import org.adempiere.core.domains.models.X_C_Payment;
 import org.adempiere.core.domains.models.X_I_BankStatement;
@@ -24,14 +29,18 @@ import org.compiere.model.MBPartner;
 import org.compiere.model.MBank;
 import org.compiere.model.MBankAccount;
 import org.compiere.model.MBankStatement;
+import org.compiere.model.MBankStatementLineMatch;
 import org.compiere.model.MCurrency;
+import org.compiere.model.MOrg;
 import org.compiere.model.MPayment;
 import org.compiere.model.MRefList;
+import org.compiere.model.Query;
 import org.compiere.util.Env;
 import org.compiere.util.Util;
 import org.spin.backend.grpc.form.bank_statement_match.Bank;
 import org.spin.backend.grpc.form.bank_statement_match.BankAccount;
 import org.spin.backend.grpc.form.bank_statement_match.BankStatement;
+import org.spin.backend.grpc.form.bank_statement_match.BankStatementLineMatch;
 import org.spin.backend.grpc.form.bank_statement_match.BusinessPartner;
 import org.spin.backend.grpc.form.bank_statement_match.Currency;
 import org.spin.backend.grpc.form.bank_statement_match.ImportedBankMovement;
@@ -42,7 +51,6 @@ import org.spin.backend.grpc.form.bank_statement_match.TenderType;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
 import org.spin.service.grpc.util.value.TimeManager;
-import org.spin.service.grpc.util.value.ValueManager;
 
 /**
  * This class was created for add all convert methods for Issue Management form
@@ -73,6 +81,11 @@ public class BankStatementMatchConvertUtil {
 			.setName(
 				TextManager.getValidString(
 					bank.getName()
+				)
+			)
+			.setDisplayValue(
+				TextManager.getValidString(
+					bank.getDisplayValue()
 				)
 			)
 			.setRoutingNo(
@@ -137,6 +150,11 @@ public class BankStatementMatchConvertUtil {
 					bankAccount.getName()
 				)
 			)
+			.setDisplayValue(
+				TextManager.getValidString(
+					bankAccount.getDisplayValue()
+				)
+			)
 			.setBank(
 				convertBank(
 					bankAccount.getC_Bank_ID()
@@ -148,6 +166,11 @@ public class BankStatementMatchConvertUtil {
 			.setCurrentBalance(
 				NumberManager.getBigDecimalToString(
 					bankAccount.getCurrentBalance()
+				)
+			)
+			.setOrganizationName(
+				TextManager.getValidString(
+					MOrg.get(Env.getCtx(), bankAccount.getAD_Org_ID()).getName()
 				)
 			)
 		;
@@ -185,19 +208,24 @@ public class BankStatementMatchConvertUtil {
 					bankStatement.getUUID()
 				)
 			)
-			.setBankAccount(
-				convertBankAccount(
-					bankStatement.getC_BankAccount_ID()
-				)
-			)
 			.setDocumentNo(
 				TextManager.getValidString(
 					bankStatement.getDocumentNo()
 				)
 			)
+			.setDisplayValue(
+				TextManager.getValidString(
+					bankStatement.getDisplayValue()
+				)
+			)
 			.setName(
 				TextManager.getValidString(
 					bankStatement.getName()
+				)
+			)
+			.setBankAccount(
+				convertBankAccount(
+					bankStatement.getC_BankAccount_ID()
 				)
 			)
 			.setDescription(
@@ -211,7 +239,7 @@ public class BankStatementMatchConvertUtil {
 				)
 			)
 			.setStatementDate(
-				ValueManager.getProtoTimestampFromTimestamp(
+				TimeManager.getProtoTimestampFromTimestamp(
 					bankStatement.getStatementDate()
 				)
 			)
@@ -248,6 +276,13 @@ public class BankStatementMatchConvertUtil {
 			return BusinessPartner.newBuilder();
 		}
 		MBPartner businessPartner = MBPartner.get(Env.getCtx(), businessPartnerId);
+		return convertBusinessPartner(businessPartner);
+	}
+	public static BusinessPartner.Builder convertBusinessPartner(String businessPartnerValue) {
+		if (Util.isEmpty(businessPartnerValue, true)) {
+			return BusinessPartner.newBuilder();
+		}
+		MBPartner businessPartner = MBPartner.get(Env.getCtx(), businessPartnerValue);
 		return convertBusinessPartner(businessPartner);
 	}
 	public static BusinessPartner.Builder convertBusinessPartner(MBPartner businessPartner) {
@@ -417,8 +452,15 @@ public class BankStatementMatchConvertUtil {
 				)
 			)
 			.setTransactionDate(
-				ValueManager.getProtoTimestampFromTimestamp(
+				TimeManager.getProtoTimestampFromTimestamp(
 					payment.getDateTrx()
+				)
+			)
+			.setTransactionDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(
+						payment.getDateTrx()
+					)
 				)
 			)
 			.setIsReceipt(isReceipt)
@@ -446,265 +488,561 @@ public class BankStatementMatchConvertUtil {
 	}
 
 
-
-	public static ImportedBankMovement.Builder convertImportedBankMovement(X_I_BankStatement bankStatemet) {
-		ImportedBankMovement.Builder builder = ImportedBankMovement.newBuilder();
-		if (bankStatemet == null || bankStatemet.getI_BankStatement_ID() <= 0) {
+	public static Payment.Builder convertPayment(ResultSet rs) throws SQLException {
+		Payment.Builder builder = Payment.newBuilder();
+		if (rs == null) {
 			return builder;
 		}
 
+		int businessPartnerId = rs.getInt("C_BPartner_ID");
+		BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(businessPartnerId);
+
+		int currencyId = rs.getInt("C_Currency_ID");
+		Currency.Builder currencyBuilder = convertCurrency(currencyId);
+
+		String tenderType = rs.getString("TenderType");
+		TenderType.Builder tenderTypeBuilder = convertTenderType(tenderType);
+
+		boolean isReceipt = "Y".equals(rs.getString("IsReceipt"));
+		BigDecimal paymentAmount = rs.getBigDecimal("PayAmt");
+		if (!isReceipt) {
+			paymentAmount = paymentAmount.negate();
+		}
+
+		java.sql.Timestamp dateTrx = rs.getTimestamp("DateTrx");
+
 		builder.setId(
-				bankStatemet.getI_BankStatement_ID()
-			)
-			.setUuid(
-				TextManager.getValidString(
-					bankStatemet.getUUID()
-				)
-			)
-			.setReferenceNo(
-				TextManager.getValidString(
-					bankStatemet.getReferenceNo()
-				)
-			)
-			.setIsReceipt(
-				bankStatemet.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
-			)
-			.setReferenceNo(
-				TextManager.getValidString(
-					bankStatemet.getReferenceNo()
-				)
-			)
-			.setMemo(
-				TextManager.getValidString(
-					bankStatemet.getMemo()
-				)
+				rs.getInt("C_Payment_ID")
 			)
 			.setTransactionDate(
-				ValueManager.getProtoTimestampFromTimestamp(
-					bankStatemet.getStatementLineDate()
+				TimeManager.getProtoTimestampFromTimestamp(dateTrx)
+			)
+			.setTransactionDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(
+						dateTrx
+					)
+				)
+			)
+			.setIsReceipt(isReceipt)
+			.setDocumentNo(
+				TextManager.getValidString(
+					rs.getString("DocumentNo")
+				)
+			)
+			.setDescription(
+				TextManager.getValidString(
+					rs.getString("Description")
 				)
 			)
 			.setAmount(
-				NumberManager.getBigDecimalToString(
-					bankStatemet.getTrxAmt()
+				NumberManager.getBigDecimalToString(paymentAmount)
+			)
+			.setAmountFormatted(
+				TextManager.getValidString(
+					NumberManager.getAmountDisplayValueWithCurrency(
+						paymentAmount,
+						currencyId
+					)
 				)
 			)
-			.setBankStatementLineId(bankStatemet.getC_BankStatementLine_ID())
+			.setBusinessPartner(businessPartnerBuilder)
+			.setTenderType(tenderTypeBuilder)
+			.setCurrency(currencyBuilder)
+			.setIsMatched(
+				rs.getBoolean("IsMatched")
+			)
+			.setIsManualMatch(
+				rs.getBoolean("IsManualMatch")
+			)
 		;
 
-		BusinessPartner.Builder businessPartnerBuilder = BankStatementMatchConvertUtil.convertBusinessPartner(
-			bankStatemet.getC_BPartner_ID()
-		);
-		if (bankStatemet.getC_BPartner_ID() <= 0) {
-			businessPartnerBuilder.setName(
-				TextManager.getValidString(
-					bankStatemet.getBPartnerValue()
+		// Multi-payment match: populate line_matches
+		boolean isMultiPaymentMatch = rs.getBoolean("IsMultiPaymentMatch");
+		builder.setIsMultiPaymentMatch(isMultiPaymentMatch);
+		if (isMultiPaymentMatch) {
+			int paymentId = rs.getInt("C_Payment_ID");
+			if (paymentId > 0) {
+				List<MBankStatementLineMatch> lineMatches = new Query(
+					Env.getCtx(),
+					I_C_BankStatementLineMatch.Table_Name,
+					"C_Payment_ID = ?",
+					null
 				)
-			).setValue(
-				TextManager.getValidString(
-					bankStatemet.getBPartnerValue()
-				)
-			);
+					.setParameters(paymentId)
+					.setClient_ID()
+					.list()
+				;
+				for (MBankStatementLineMatch lineMatch : lineMatches) {
+					BankStatementLineMatch.Builder builderMatch = convertBankStatementLineMatch(lineMatch);
+					builder.addLineMatches(
+						builderMatch
+					);
+				}
+			}
 		}
-		builder.setBusinessPartner(businessPartnerBuilder);
-
-		Currency.Builder currencyBuilder = Currency.newBuilder();
-		if (bankStatemet.getC_Currency_ID() > 0) {
-			currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
-				bankStatemet.getC_Currency_ID()
-			);
-		} else {
- 			currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
-				bankStatemet.getISO_Code()
-			);
-		}
-		builder.setCurrency(currencyBuilder);
 
 		return builder;
 	}
 
 
-
-	public static MatchingMovement.Builder convertMatchMovement(X_I_BankStatement bankStatemet) {
-		MatchingMovement.Builder builder = MatchingMovement.newBuilder();
-		if (bankStatemet == null || bankStatemet.getI_BankStatement_ID() <= 0) {
+	public static ImportedBankMovement.Builder convertImportedBankMovement(X_I_BankStatement importBankStatement) {
+		ImportedBankMovement.Builder builder = ImportedBankMovement.newBuilder();
+		if (importBankStatement == null || importBankStatement.getI_BankStatement_ID() <= 0) {
 			return builder;
 		}
 
 		builder.setId(
-				bankStatemet.getI_BankStatement_ID()
+				importBankStatement.getI_BankStatement_ID()
 			)
 			.setUuid(
 				TextManager.getValidString(
-					bankStatemet.getUUID()
+					importBankStatement.getUUID()
 				)
 			)
 			.setReferenceNo(
 				TextManager.getValidString(
-					bankStatemet.getReferenceNo()
-				)
-			)
-			.setDescription(
-				TextManager.getValidString(
-					bankStatemet.getDescription()
+					importBankStatement.getReferenceNo()
 				)
 			)
 			.setIsReceipt(
-				bankStatemet.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
+				importBankStatement.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
+			)
+			.setReferenceNo(
+				TextManager.getValidString(
+					importBankStatement.getReferenceNo()
+				)
 			)
 			.setMemo(
 				TextManager.getValidString(
-					bankStatemet.getMemo()
+					importBankStatement.getMemo()
+				)
+			)
+			.setLineDescription(
+				TextManager.getValidString(
+					importBankStatement.getLineDescription()
 				)
 			)
 			.setTransactionDate(
-				ValueManager.getProtoTimestampFromTimestamp(
-					bankStatemet.getStatementLineDate()
+				TimeManager.getProtoTimestampFromTimestamp(
+					importBankStatement.getStatementLineDate()
 				)
 			)
-			.setBusinessPartner(
-				convertBusinessPartner(
-					bankStatemet.getC_BPartner_ID()
+			.setTransactionDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(
+						importBankStatement.getStatementLineDate()
+					)
 				)
 			)
 			.setAmount(
 				NumberManager.getBigDecimalToString(
-					bankStatemet.getTrxAmt()
+					importBankStatement.getTrxAmt()
 				)
 			)
-			.setIsAutomatic(
-				bankStatemet.get_ValueAsBoolean(
+			.setBankStatementLineId(
+				importBankStatement.getC_BankStatementLine_ID()
+			)
+			.setIsManualMatch(
+				importBankStatement.get_ValueAsBoolean(
+					"IsManualMatch"
+				)
+			)
+			.setIsMatched(
+				importBankStatement.get_ValueAsBoolean(
 					"IsMatched"
 				)
+				|| importBankStatement.getC_Payment_ID() > 0
 			)
 		;
 
-		if (bankStatemet.getC_Payment_ID() > 0) {
-			MPayment payment = new MPayment(Env.getCtx(), bankStatemet.getC_Payment_ID(), null);
-			builder.setPaymentId(
-					payment.getC_Payment_ID()
-				)
-				.setUuid(
-					TextManager.getValidString(
-						payment.getUUID()
-					)
-				)
-				.setDocumentNo(
-					TextManager.getValidString(
-						payment.getDocumentNo()
-					)
-				)
-				.setPaymentAmount(
-					NumberManager.getBigDecimalToString(
-						payment.getPayAmt()
-					)
-				)
-				.setPaymentDate(
-					ValueManager.getProtoTimestampFromTimestamp(
-						payment.getDateTrx()
-					)
-				)
-			;
-			TenderType.Builder tenderTypeBuilder = convertTenderType(
-				payment.getTenderType()
-			);
-			builder.setTenderType(tenderTypeBuilder);
+		if (importBankStatement.getC_Payment_ID() > 0) {
+			MPayment payment = new MPayment(Env.getCtx(), importBankStatement.getC_Payment_ID(), null);
 
-			if (builder.getBusinessPartner().getId() <= 0) {
-				BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
-					payment.getC_BPartner_ID()
-				);
-				builder.setBusinessPartner(businessPartnerBuilder);
-			}
+			BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+				payment.getC_BPartner_ID()
+			);
+			builder.setBusinessPartner(businessPartnerBuilder);
+
 			Currency.Builder currencyBuilder = convertCurrency(
 				payment.getC_Currency_ID()
 			);
 			builder.setCurrency(currencyBuilder);
 		}
 
+		// Fill Business Partner
+		if (builder.getBusinessPartner() == null || builder.getBusinessPartner().getId() <= 0) {
+			if (importBankStatement.getC_BPartner_ID() > 0) {
+				BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+					importBankStatement.getC_BPartner_ID()
+				);
+				builder.setBusinessPartner(businessPartnerBuilder);
+			} else if (!Util.isEmpty(importBankStatement.getBPartnerValue(), true)) {
+				BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+					importBankStatement.getBPartnerValue()
+				);
+				builder.setBusinessPartner(businessPartnerBuilder);
+			}
+		}
+
+		// Fill Currency
+		if (builder.getCurrency() == null || builder.getCurrency().getId() <= 0) {
+			if (importBankStatement.getC_Currency_ID() > 0) {
+				Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+					importBankStatement.getC_Currency_ID()
+				);
+				builder.setCurrency(currencyBuilder);
+			} else if (!Util.isEmpty(importBankStatement.getISO_Code(), true)) {
+				Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+					importBankStatement.getISO_Code()
+				);
+				builder.setCurrency(currencyBuilder);
+			}
+		}
+
+		builder
+			.setAmountFormatted(
+				TextManager.getValidString(
+					NumberManager.getAmountDisplayValueWithCurrency(
+						importBankStatement.getTrxAmt(),
+						builder.getCurrency().getId()
+					)
+				)
+			)
+		;
+
+		// Multi-payment match
+		boolean isMultiPaymentMatch = importBankStatement.get_ValueAsBoolean("IsMultiPaymentMatch");
+		builder.setIsMultiPaymentMatch(isMultiPaymentMatch);
+		if (isMultiPaymentMatch) {
+			List<MBankStatementLineMatch> lineMatches = BankStatementMatchUtil.getLineMatchesByImportedMovement(
+				importBankStatement.getI_BankStatement_ID()
+			);
+			for (MBankStatementLineMatch lineMatch : lineMatches) {
+				builder.addLineMatches(convertBankStatementLineMatch(lineMatch));
+			}
+		}
+
 		return builder;
 	}
 
 
 
-	public static ResultMovement.Builder convertResultMovement(X_I_BankStatement bankStatemet) {
-		ResultMovement.Builder builder = ResultMovement.newBuilder();
-		if (bankStatemet == null || bankStatemet.getI_BankStatement_ID() <= 0) {
+	public static MatchingMovement.Builder convertMatchMovement(X_I_BankStatement importBankStatement) {
+		MatchingMovement.Builder builder = MatchingMovement.newBuilder();
+		if (importBankStatement == null || importBankStatement.getI_BankStatement_ID() <= 0) {
 			return builder;
 		}
+
 		builder.setId(
-				bankStatemet.getI_BankStatement_ID()
+				importBankStatement.getI_BankStatement_ID()
 			)
 			.setUuid(
 				TextManager.getValidString(
-					bankStatemet.getUUID()
+					importBankStatement.getUUID()
 				)
 			)
 			.setReferenceNo(
 				TextManager.getValidString(
-					bankStatemet.getReferenceNo()
+					importBankStatement.getReferenceNo()
 				)
 			)
 			.setIsReceipt(
-				bankStatemet.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
+				importBankStatement.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
 			)
-			.setReferenceNo(
+			.setDescription(
 				TextManager.getValidString(
-					bankStatemet.getReferenceNo()
+					importBankStatement.getDescription()
 				)
 			)
 			.setMemo(
 				TextManager.getValidString(
-					bankStatemet.getMemo()
+					importBankStatement.getMemo()
+				)
+			)
+			.setLineDescription(
+				TextManager.getValidString(
+					importBankStatement.getLineDescription()
 				)
 			)
 			.setTransactionDate(
 				TimeManager.getProtoTimestampFromTimestamp(
-					bankStatemet.getStatementLineDate()
+					importBankStatement.getStatementLineDate()
+				)
+			)
+			.setTransactionDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(
+						importBankStatement.getStatementLineDate()
+					)
 				)
 			)
 			.setAmount(
 				NumberManager.getBigDecimalToString(
-					bankStatemet.getTrxAmt()
+					importBankStatement.getTrxAmt()
 				)
 			)
-			.setIsAutomatic(
-				bankStatemet.get_ValueAsBoolean(
+			.setBankStatementLineId(
+				importBankStatement.getC_BankStatementLine_ID()
+			)
+			.setIsManualMatch(
+				importBankStatement.get_ValueAsBoolean(
+					"IsManualMatch"
+				)
+			)
+			.setIsMatched(
+				importBankStatement.get_ValueAsBoolean(
 					"IsMatched"
+				)
+				|| importBankStatement.getC_Payment_ID() > 0
+			)
+		;
+
+		// Fill Business Partner
+		if (importBankStatement.getC_BPartner_ID() > 0) {
+			BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+				importBankStatement.getC_BPartner_ID()
+			);
+			builder.setBusinessPartner(businessPartnerBuilder);
+		} else if (!Util.isEmpty(importBankStatement.getBPartnerValue(), true)) {
+			BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+				importBankStatement.getBPartnerValue()
+			);
+			builder.setBusinessPartner(businessPartnerBuilder);
+		}
+
+		// Fill Currency
+		if (importBankStatement.getC_Currency_ID() > 0) {
+			Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+				importBankStatement.getC_Currency_ID()
+			);
+			builder.setCurrency(currencyBuilder);
+		} else if (!Util.isEmpty(importBankStatement.getISO_Code(), true)) {
+ 			Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+				importBankStatement.getISO_Code()
+			);
+			builder.setCurrency(currencyBuilder);
+		}
+
+		if (importBankStatement.getC_Payment_ID() > 0) {
+			MPayment payment = new MPayment(Env.getCtx(), importBankStatement.getC_Payment_ID(), null);
+			builder.setPaymentId(
+					payment.getC_Payment_ID()
+				)
+				.setPaymentUuid(
+					TextManager.getValidString(
+						payment.getUUID()
+					)
+				)
+				.setDocumentNo(
+					TextManager.getValidString(
+						payment.getDocumentNo()
+					)
+				)
+				.setPaymentDate(
+					TimeManager.getProtoTimestampFromTimestamp(
+						payment.getDateTrx()
+					)
+				)
+				.setPaymentDateFormatted(
+					TextManager.getValidString(
+						TimeManager.getDateDisplayValue(
+							payment.getDateTrx()
+						)
+					)
+				)
+				.setPaymentAmount(
+					NumberManager.getBigDecimalToString(
+						payment.getPayAmt()
+					)
+				)
+				.setDescription(
+					TextManager.getValidString(
+						payment.getDescription()
+					)
+				)
+			;
+			TenderType.Builder tenderTypeBuilder = convertTenderType(
+				payment.getTenderType()
+			);
+			builder.setTenderType(tenderTypeBuilder);
+
+			// Fill Business Partner
+			if (builder.getBusinessPartner() == null || builder.getBusinessPartner().getId() <= 0) {
+				BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+					payment.getC_BPartner_ID()
+				);
+				builder.setBusinessPartner(businessPartnerBuilder);
+			}
+
+			// Fill Currency
+			if (builder.getCurrency() == null || builder.getCurrency().getId() <= 0) {
+				Currency.Builder currencyBuilder = convertCurrency(
+					payment.getC_Currency_ID()
+				);
+				builder.setCurrency(currencyBuilder);
+			}
+
+			builder
+				.setPaymentAmountFormatted(
+					TextManager.getValidString(
+						NumberManager.getAmountDisplayValueWithCurrency(
+							payment.getPayAmt(),
+							builder.getCurrency().getId()
+						)
+					)
+				)
+			;
+		}
+
+		builder
+			.setAmountFormatted(
+				TextManager.getValidString(
+					NumberManager.getAmountDisplayValueWithCurrency(
+						importBankStatement.getTrxAmt(),
+						builder.getCurrency().getId()
+					)
 				)
 			)
 		;
 
-		BusinessPartner.Builder businessPartnerBuilder = BankStatementMatchConvertUtil.convertBusinessPartner(
-			bankStatemet.getC_BPartner_ID()
-		);
-		if (bankStatemet.getC_BPartner_ID() <= 0) {
-			businessPartnerBuilder.setName(
-				TextManager.getValidString(
-					bankStatemet.getBPartnerValue()
-				)
-			).setValue(
-				TextManager.getValidString(
-					bankStatemet.getBPartnerValue()
-				)
+		// Multi-payment match
+		boolean isMultiPaymentMatch = importBankStatement.get_ValueAsBoolean("IsMultiPaymentMatch");
+		builder.setIsMultiPaymentMatch(isMultiPaymentMatch);
+		if (isMultiPaymentMatch) {
+			List<MBankStatementLineMatch> lineMatches = BankStatementMatchUtil.getLineMatchesByImportedMovement(
+				importBankStatement.getI_BankStatement_ID()
 			);
+			for (MBankStatementLineMatch lineMatch : lineMatches) {
+				builder.addLineMatches(convertBankStatementLineMatch(lineMatch));
+			}
 		}
-		builder.setBusinessPartner(businessPartnerBuilder);
 
-		Currency.Builder currencyBuilder = Currency.newBuilder();
-		if (bankStatemet.getC_Currency_ID() > 0) {
-			currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
-				bankStatemet.getC_Currency_ID()
-			);
-		} else {
- 			currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
-				bankStatemet.getISO_Code()
-			);
+		return builder;
+	}
+
+
+
+	public static BankStatementLineMatch.Builder convertBankStatementLineMatch(MBankStatementLineMatch lineMatch) {
+		BankStatementLineMatch.Builder builder = BankStatementLineMatch.newBuilder();
+		if (lineMatch == null || lineMatch.getC_BankStatementLineMatch_ID() <= 0) {
+			return builder;
 		}
-		builder.setCurrency(currencyBuilder);
+		builder.setId(lineMatch.getC_BankStatementLineMatch_ID())
+			.setUuid(
+				TextManager.getValidString(lineMatch.getUUID())
+			)
+			.setImportedMovementId(lineMatch.getI_BankStatement_ID())
+			.setBankStatementLineId(lineMatch.getC_BankStatementLine_ID())
+			.setIsManualMatch(lineMatch.isManualMatch())
+			.setMatchDate(
+				TimeManager.getProtoTimestampFromTimestamp(lineMatch.getMatchDate())
+			)
+			.setMatchDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(lineMatch.getMatchDate())
+				)
+			)
+		;
+		// Payment
+		if (lineMatch.getC_Payment_ID() > 0) {
+			MPayment payment = new MPayment(Env.getCtx(), lineMatch.getC_Payment_ID(), null);
+			builder.setPayment(convertPayment(payment));
+		}
+		// Currency
+		builder.setCurrency(convertCurrency(lineMatch.getC_Currency_ID()));
+		return builder;
+	}
 
-		if (bankStatemet.getC_Payment_ID() > 0) {
-			MPayment payment = new MPayment(Env.getCtx(), bankStatemet.getC_Payment_ID(), null);
+
+
+	public static ResultMovement.Builder convertResultMovement(X_I_BankStatement importBankStatement) {
+		ResultMovement.Builder builder = ResultMovement.newBuilder();
+		if (importBankStatement == null || importBankStatement.getI_BankStatement_ID() <= 0) {
+			return builder;
+		}
+		builder.setId(
+				importBankStatement.getI_BankStatement_ID()
+			)
+			.setUuid(
+				TextManager.getValidString(
+					importBankStatement.getUUID()
+				)
+			)
+			.setReferenceNo(
+				TextManager.getValidString(
+					importBankStatement.getReferenceNo()
+				)
+			)
+			.setIsReceipt(
+				importBankStatement.getTrxAmt().compareTo(BigDecimal.ZERO) >= 0
+			)
+			.setMemo(
+				TextManager.getValidString(
+					importBankStatement.getMemo()
+				)
+			)
+			.setTransactionDate(
+				TimeManager.getProtoTimestampFromTimestamp(
+					importBankStatement.getStatementLineDate()
+				)
+			)
+			.setTransactionDateFormatted(
+				TextManager.getValidString(
+					TimeManager.getDateDisplayValue(
+						importBankStatement.getStatementLineDate()
+					)
+				)
+			)
+			.setAmount(
+				NumberManager.getBigDecimalToString(
+					importBankStatement.getTrxAmt()
+				)
+			)
+			.setBankStatementLineId(
+				importBankStatement.getC_BankStatementLine_ID()
+			)
+			.setIsManualMatch(
+				importBankStatement.get_ValueAsBoolean(
+					"IsManualMatch"
+				)
+			)
+			.setIsMatched(
+				importBankStatement.get_ValueAsBoolean(
+					"IsMatched"
+				)
+				|| importBankStatement.getC_Payment_ID() > 0
+			)
+		;
+
+		// Fill Business Partner
+		if (importBankStatement.getC_BPartner_ID() > 0) {
+			BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+				importBankStatement.getC_BPartner_ID()
+			);
+			builder.setBusinessPartner(businessPartnerBuilder);
+		} else if (!Util.isEmpty(importBankStatement.getBPartnerValue(), true)) {
+			BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
+				importBankStatement.getBPartnerValue()
+			);
+			builder.setBusinessPartner(businessPartnerBuilder);
+		}
+
+		// Fill Currency
+		if (importBankStatement.getC_Currency_ID() > 0) {
+			Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+				importBankStatement.getC_Currency_ID()
+			);
+			builder.setCurrency(currencyBuilder);
+		} else if (!Util.isEmpty(importBankStatement.getISO_Code(), true)) {
+ 			Currency.Builder currencyBuilder = BankStatementMatchConvertUtil.convertCurrency(
+				importBankStatement.getISO_Code()
+			);
+			builder.setCurrency(currencyBuilder);
+		}
+
+		if (importBankStatement.getC_Payment_ID() > 0) {
+			MPayment payment = new MPayment(Env.getCtx(), importBankStatement.getC_Payment_ID(), null);
 			builder.setPaymentId(
 					payment.getC_Payment_ID()
 				)
@@ -718,14 +1056,26 @@ public class BankStatementMatchConvertUtil {
 						payment.getDocumentNo()
 					)
 				)
+				.setPaymentDate(
+					TimeManager.getProtoTimestampFromTimestamp(
+						payment.getDateTrx()
+					)
+				)
+				.setPaymentDateFormatted(
+					TextManager.getValidString(
+						TimeManager.getDateDisplayValue(
+							payment.getDateTrx()
+						)
+					)
+				)
 				.setPaymentAmount(
 					NumberManager.getBigDecimalToString(
 						payment.getPayAmt()
 					)
 				)
-				.setPaymentDate(
-					ValueManager.getProtoTimestampFromTimestamp(
-						payment.getDateTrx()
+				.setDescription(
+					TextManager.getValidString(
+						payment.getDescription()
 					)
 				)
 			;
@@ -734,21 +1084,46 @@ public class BankStatementMatchConvertUtil {
 			);
 			builder.setTenderType(tenderTypeBuilder);
 
-			if (builder.getBusinessPartner().getId() <= 0) {
-				businessPartnerBuilder = convertBusinessPartner(
+			// Fill Business Partner
+			if (builder.getBusinessPartner() == null || builder.getBusinessPartner().getId() <= 0) {
+				BusinessPartner.Builder businessPartnerBuilder = convertBusinessPartner(
 					payment.getC_BPartner_ID()
 				);
+				builder.setBusinessPartner(businessPartnerBuilder);
+				builder.setBusinessPartner(businessPartnerBuilder);
 			}
 
-			if (builder.getCurrency().getId() <= 0) {
-				currencyBuilder = convertCurrency(
+			// Fill Currency
+			if (builder.getCurrency() == null || builder.getCurrency().getId() <= 0) {
+				Currency.Builder currencyBuilder = convertCurrency(
 					payment.getC_Currency_ID()
 				);
+				builder.setCurrency(currencyBuilder);
 			}
 		}
 
-		builder.setBusinessPartner(businessPartnerBuilder)
-			.setCurrency(currencyBuilder);
+		builder
+			.setAmountFormatted(
+				TextManager.getValidString(
+					NumberManager.getAmountDisplayValueWithCurrency(
+						importBankStatement.getTrxAmt(),
+						builder.getCurrency().getId()
+					)
+				)
+			)
+		;
+
+		// Multi-payment match
+		boolean isMultiPaymentMatch = importBankStatement.get_ValueAsBoolean("IsMultiPaymentMatch");
+		builder.setIsMultiPaymentMatch(isMultiPaymentMatch);
+		if (isMultiPaymentMatch) {
+			List<MBankStatementLineMatch> lineMatches = BankStatementMatchUtil.getLineMatchesByImportedMovement(
+				importBankStatement.getI_BankStatement_ID()
+			);
+			for (MBankStatementLineMatch lineMatch : lineMatches) {
+				builder.addLineMatches(convertBankStatementLineMatch(lineMatch));
+			}
+		}
 
 		return builder;
 	}

@@ -20,8 +20,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
@@ -31,11 +33,9 @@ import org.adempiere.core.domains.models.I_AD_Org;
 import org.adempiere.core.domains.models.I_C_BPartner;
 import org.adempiere.core.domains.models.I_C_Charge;
 import org.adempiere.core.domains.models.I_C_ConversionType;
-import org.adempiere.core.domains.models.I_C_Conversion_Rate;
+// import org.adempiere.core.domains.models.I_C_Conversion_Rate;
 import org.adempiere.core.domains.models.I_C_Currency;
 import org.adempiere.core.domains.models.I_C_DocType;
-import org.adempiere.core.domains.models.I_C_Invoice;
-import org.adempiere.core.domains.models.I_C_Payment;
 import org.adempiere.core.domains.models.X_T_InvoiceGL;
 import org.adempiere.exceptions.AdempiereException;
 import org.compiere.model.MAcctSchema;
@@ -49,6 +49,7 @@ import org.compiere.model.MCurrency;
 import org.compiere.model.MLookupInfo;
 import org.compiere.model.MMenu;
 import org.compiere.model.MOrg;
+import org.compiere.model.MInvoice;
 import org.compiere.model.MPayment;
 import org.compiere.model.MRole;
 import org.compiere.model.MTable;
@@ -70,11 +71,12 @@ import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
 import org.spin.service.grpc.util.value.TimeManager;
 import org.spin.backend.grpc.common.ListLookupItemsResponse;
+import org.spin.backend.grpc.form.payment_allocation.CalculateDifferenceRequest;
+import org.spin.backend.grpc.form.payment_allocation.CalculateDifferenceResponse;
 import org.spin.backend.grpc.form.payment_allocation.ConversionRate;
 import org.spin.backend.grpc.form.payment_allocation.ConversionType;
 import org.spin.backend.grpc.form.payment_allocation.CreateConversionRateRequest;
 import org.spin.backend.grpc.form.payment_allocation.Currency;
-import org.spin.backend.grpc.form.payment_allocation.DocumentType;
 import org.spin.backend.grpc.form.payment_allocation.Invoice;
 import org.spin.backend.grpc.form.payment_allocation.InvoiceSelection;
 import org.spin.backend.grpc.form.payment_allocation.ListBusinessPartnersRequest;
@@ -90,12 +92,10 @@ import org.spin.backend.grpc.form.payment_allocation.ListPaymentsRequest;
 import org.spin.backend.grpc.form.payment_allocation.ListPaymentsResponse;
 import org.spin.backend.grpc.form.payment_allocation.ListTransactionOrganizationsRequest;
 import org.spin.backend.grpc.form.payment_allocation.ListTransactionTypesRequest;
-import org.spin.backend.grpc.form.payment_allocation.Organization;
 import org.spin.backend.grpc.form.payment_allocation.Payment;
 import org.spin.backend.grpc.form.payment_allocation.PaymentSelection;
 import org.spin.backend.grpc.form.payment_allocation.ProcessRequest;
 import org.spin.backend.grpc.form.payment_allocation.ProcessResponse;
-import org.spin.backend.grpc.form.payment_allocation.TransactionType;
 
 public class PaymentAllocationLogic {
 
@@ -136,6 +136,12 @@ public class PaymentAllocationLogic {
 	 * @return
 	 */
 	public static ListLookupItemsResponse.Builder listOrganizations(ListOrganizationsRequest request) {
+		//	Add to recent Item
+		org.spin.dictionary.util.DictionaryUtil.addToRecentItem(
+			MMenu.ACTION_Form,
+			FORM_ID
+		);
+
 		// Organization filter selection
 		int columnId = 839; // C_Period.AD_Org_ID (needed to allow org 0)
 		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
@@ -293,10 +299,10 @@ public class PaymentAllocationLogic {
 			I_C_ConversionType.Table_Name
 		);
 
-		String whereClause = "";
+		String whereClause = " 1=1 ";
 		List<Object> parametersList = new ArrayList<Object>();
 		if (table.get_ColumnIndex(I_C_BPartner.COLUMNNAME_C_BPartner_ID) >= 0) {
-			whereClause = "C_BPartner_ID IS NULL OR C_BPartner_ID = ?";
+			whereClause = "AND (C_BPartner_ID IS NULL OR C_BPartner_ID = ?) ";
 			if (request.getBusinessPartnerId() > 0) {
 				validateAndGetBusinessPartner(
 					request.getBusinessPartnerId()
@@ -305,6 +311,25 @@ public class PaymentAllocationLogic {
 			parametersList.add(
 				request.getBusinessPartnerId()
 			);
+		}
+
+		// URL decode to change characteres and add search value to filter
+		final String searchValue = TextManager.getValidString(
+			TextManager.getDecodeUrl(
+				request.getSearchValue()
+			)
+		).strip();
+		if (!Util.isEmpty(searchValue, true)) {
+			whereClause += "AND ("
+				+ "UPPER(Value) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(Name) LIKE '%' || UPPER(?) || '%' "
+				+ "OR UPPER(Description) LIKE '%' || UPPER(?) || '%' "
+				+ ") "
+			;
+			//	Add parameters
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
+			parametersList.add(searchValue);
 		}
 
 		Query query = new Query(
@@ -342,8 +367,6 @@ public class PaymentAllocationLogic {
 
 
 	public static ConversionRate.Builder createConversionRate(CreateConversionRateRequest request) {
-		MOrg organization = new MOrg(Env.getCtx(), request.getOrganizationId(), null);
-
 		int currencyFromId = request.getCurrencyFromId();
 		if (currencyFromId <= 0) {
 			final int clientId = Env.getAD_Client_ID(Env.getCtx());
@@ -368,19 +391,20 @@ public class PaymentAllocationLogic {
 
 		AtomicReference<MConversionRate> conversionRateReference = new AtomicReference<MConversionRate>();
 		Trx.run(transactionName -> {
-			MConversionType conversionType = new Query(
-				Env.getCtx(),
-				I_C_ConversionType.Table_Name,
-				"C_BPartner_ID = ?",
-				transactionName
-			)
-				.setParameters(businessPartner.getC_BPartner_ID())
-				.setClient_ID()
-				// .setApplyAccessFilter(true)
-				.first()
-			;
-			if (conversionType == null || conversionType.getC_ConversionType_ID() <= 0) {
-				conversionType = new MConversionType(Env.getCtx(), 0, transactionName);
+			// MConversionType conversionType = new Query(
+			// 	Env.getCtx(),
+			// 	I_C_ConversionType.Table_Name,
+			// 	"C_BPartner_ID = ?",
+			// 	transactionName
+			// )
+			// 	.setParameters(businessPartner.getC_BPartner_ID())
+			// 	.setClient_ID()
+			// 	// .setApplyAccessFilter(true)
+			// 	.first()
+			// ;
+			// if (conversionType == null || conversionType.getC_ConversionType_ID() <= 0) {
+				// Always create a new conversion type
+				MConversionType conversionType = new MConversionType(Env.getCtx(), 0, transactionName);
 				// fill with parent conversion type
 				if (request.getConversionTypeId() > 0) {
 					MConversionType conversionTypeBase = new MConversionType(Env.getCtx(), request.getConversionTypeId(), transactionName);
@@ -392,28 +416,33 @@ public class PaymentAllocationLogic {
 				conversionType.setName(businessPartner.getDisplayValue());
 				conversionType.set_CustomColumn(I_C_BPartner.COLUMNNAME_C_BPartner_ID, businessPartner.getC_BPartner_ID());
 				conversionType.saveEx();
-			}
+			// }
 
-			Timestamp date = TimeManager.getTimestampFromProtoTimestamp(
-				request.getDate()
-			);
-			final Timestamp dateFrom = TimeUtil.getDay(date); // Remove time mark
-			final Timestamp dateTo = TimeUtil.addYears(dateFrom, CurrencyConvertDocumentsUtil.TIME_Interval);
+			final Timestamp date = TimeUtil.getDay(null); // Today without time mark
+			// final Timestamp date = TimeUtil.getDay(
+			// 	TimeManager.getTimestampFromProtoTimestamp(
+			// 		request.getDate()
+			// 	)
+			// );
+			final Timestamp dateFrom = TimeUtil.addYears(date, -CurrencyConvertDocumentsUtil.TIME_Interval);
+			final Timestamp dateTo = TimeUtil.addYears(date, CurrencyConvertDocumentsUtil.TIME_Interval);
 
-			final int clientId = Env.getAD_Client_ID(Env.getCtx());
-			final int organizationId = organization.getAD_Org_ID();
+			// MOrg organization = new MOrg(Env.getCtx(), request.getOrganizationId(), null);
+			// final int clientId = Env.getAD_Client_ID(Env.getCtx());
+			// final int organizationId = organization.getAD_Org_ID();
 
-			MConversionRate conversionRate = new Query(
-				Env.getCtx(),
-				I_C_Conversion_Rate.Table_Name,
-				"C_Currency_ID = ? AND C_Currency_ID_To = ? AND C_ConversionType_ID = ? AND ? >= ValidFrom AND ? <= ValidTo AND AD_Client_ID IN (0, ?) AND AD_Org_ID IN (0, ?) ",
-				transactionName
-			)
-				.setParameters(currencyFrom.getC_Currency_ID(), currencyTo.getC_Currency_ID(), conversionType.getC_ConversionType_ID(), dateFrom, dateTo, clientId, organizationId)
-				.first()
-			;
-			if (conversionRate == null || conversionRate.getC_ConversionType_ID() <= 0) {
-				conversionRate = new MConversionRate(Env.getCtx(), 0, transactionName);
+			// MConversionRate conversionRate = new Query(
+			// 	Env.getCtx(),
+			// 	I_C_Conversion_Rate.Table_Name,
+			// 	"C_Currency_ID = ? AND C_Currency_ID_To = ? AND C_ConversionType_ID = ? AND ? >= ValidFrom AND ? <= ValidTo AND AD_Client_ID IN (0, ?) AND AD_Org_ID IN (0, ?) ",
+			// 	transactionName
+			// )
+			// 	.setParameters(currencyFrom.getC_Currency_ID(), currencyTo.getC_Currency_ID(), conversionType.getC_ConversionType_ID(), dateFrom, dateTo, clientId, organizationId)
+			// 	.first()
+			// ;
+			// if (conversionRate == null || conversionRate.getC_ConversionType_ID() <= 0) {
+				// Always create new conversion rates
+				MConversionRate conversionRate = new MConversionRate(Env.getCtx(), 0, transactionName);
 				conversionRate.setAD_Org_ID(0);
 				conversionRate.setC_ConversionType_ID(
 					conversionType.getC_ConversionType_ID()
@@ -426,7 +455,7 @@ public class PaymentAllocationLogic {
 				);
 				conversionRate.setValidFrom(dateFrom);
 				conversionRate.setValidTo(dateTo);
-			}
+			// }
 			conversionRate.setMultiplyRate(negotiatedRate);
 			conversionRate.saveEx();
 
@@ -434,17 +463,17 @@ public class PaymentAllocationLogic {
 			conversionRateReference.set(conversionRate);
 
 			// Invert conversion rate
-			MConversionRate invertConversionRate = new Query(
-				Env.getCtx(),
-				I_C_Conversion_Rate.Table_Name,
-				"C_Currency_ID = ? AND C_Currency_ID_To = ? AND C_ConversionType_ID = ? AND ? >= ValidFrom AND ? <= ValidTo AND AD_Client_ID IN (0, ?) AND AD_Org_ID IN (0, ?) ",
-				transactionName
-			)
-				.setParameters(currencyTo.getC_Currency_ID(), currencyFrom.getC_Currency_ID(), conversionType.getC_ConversionType_ID(), dateFrom, dateTo, clientId, organizationId)
-				.first()
-			;
-			if (invertConversionRate == null || invertConversionRate.getC_ConversionType_ID() <= 0) {
-				invertConversionRate = new MConversionRate(Env.getCtx(), 0, transactionName);
+			// MConversionRate invertConversionRate = new Query(
+			// 	Env.getCtx(),
+			// 	I_C_Conversion_Rate.Table_Name,
+			// 	"C_Currency_ID = ? AND C_Currency_ID_To = ? AND C_ConversionType_ID = ? AND ? >= ValidFrom AND ? <= ValidTo AND AD_Client_ID IN (0, ?) AND AD_Org_ID IN (0, ?) ",
+			// 	transactionName
+			// )
+			// 	.setParameters(currencyTo.getC_Currency_ID(), currencyFrom.getC_Currency_ID(), conversionType.getC_ConversionType_ID(), dateFrom, dateTo, clientId, organizationId)
+			// 	.first()
+			// ;
+			// if (invertConversionRate == null || invertConversionRate.getC_ConversionType_ID() <= 0) {
+				MConversionRate invertConversionRate = new MConversionRate(Env.getCtx(), 0, transactionName);
 				invertConversionRate.setAD_Org_ID(0);
 				invertConversionRate.setC_ConversionType_ID(
 					conversionType.getC_ConversionType_ID()
@@ -457,7 +486,7 @@ public class PaymentAllocationLogic {
 				);
 				invertConversionRate.setValidFrom(dateFrom);
 				invertConversionRate.setValidTo(dateTo);
-			}
+			// }
 			invertConversionRate.setDivideRate(negotiatedRate);
 			invertConversionRate.saveEx();
 		});
@@ -600,71 +629,7 @@ public class PaymentAllocationLogic {
 			int recordCount = 0;
 			while (rs.next()) {
 				recordCount++;
-
-				DocumentType.Builder documentTypeBuilder = PaymentAllocationConvertUtil.convertDocumentType(
-					rs.getInt(I_C_Payment.COLUMNNAME_C_DocType_ID)
-				);
-				Organization.Builder organizationBuilder = PaymentAllocationConvertUtil.convertOrganization(
-					rs.getInt(I_AD_Org.COLUMNNAME_AD_Org_ID)
-				);
-
-				Currency.Builder currencyBuilder = PaymentAllocationConvertUtil.convertCurrency(
-					rs.getString(I_C_Currency.COLUMNNAME_ISO_Code)
-				);
-
-				boolean isReceipt = BooleanManager.getBooleanFromString(
-					rs.getString("IsReceipt")
-				);
-				TransactionType.Builder transactionTypeBuilder = PaymentAllocationConvertUtil.convertTransactionType(
-					isReceipt ? X_T_InvoiceGL.APAR_ReceivablesOnly : X_T_InvoiceGL.APAR_PayablesOnly
-				);
-
-				int paymentId = rs.getInt(I_C_Payment.COLUMNNAME_C_Payment_ID);
-				Payment.Builder paymentBuilder = Payment.newBuilder()
-					.setId(paymentId)
-					// .setUuid(
-					// 	TextManager.getValidString(
-					// 		rs.getString(I_C_Payment.COLUMNNAME_UUID)
-					// 	)
-					// )
-					.setDocumentNo(
-						TextManager.getValidString(
-							rs.getString(I_C_Payment.COLUMNNAME_DocumentNo)
-						)
-					)
-					.setDocumentType(
-						documentTypeBuilder
-					)
-					.setTransactionDate(
-						TimeManager.getProtoTimestampFromTimestamp(
-							rs.getTimestamp(I_C_Payment.COLUMNNAME_DateTrx)
-						)
-					)
-					.setIsReceipt(isReceipt)
-					.setDescription(
-						TextManager.getValidString(
-							rs.getString(I_C_Payment.COLUMNNAME_Description)
-						)
-					)
-					.setPaymentAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal(I_C_Payment.COLUMNNAME_PayAmt)
-						)
-					)
-					.setConvertedAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("ConvertedAmt")
-						)
-					)
-					.setOpenAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("AvailableAmt")
-						)
-					)
-					.setTransactionType(transactionTypeBuilder)
-					.setOrganization(organizationBuilder)
-					.setCurrency(currencyBuilder)
-				;
+				Payment.Builder paymentBuilder = PaymentAllocationConvertUtil.convertPaymentAllocation(rs);
 
 				builderList.addRecords(paymentBuilder);
 			}
@@ -759,6 +724,7 @@ public class PaymentAllocationLogic {
 			sql.append("i.C_ConversionType_ID, ");
 		}
 		sql.append("i.AD_Client_ID, i.AD_Org_ID) * i.Multiplier * i.MultiplierAP) AS DiscountAmt, "               //  #5, #6
+			+ "i.Multiplier, "
 			+ "i.MultiplierAP, i.IsSoTrx, i.AD_Org_ID " // 9..11
 			+ "FROM C_Invoice_v i "		//  corrected for CM/Split
 			+ "INNER JOIN C_Currency c ON (i.C_Currency_ID=c.C_Currency_ID) "
@@ -830,84 +796,15 @@ public class PaymentAllocationLogic {
 			int recordCount = 0;
 			while (rs.next()) {
 				recordCount++;
-
-				DocumentType.Builder targetDocumentTypeBuilder = PaymentAllocationConvertUtil.convertDocumentType(
-					rs.getInt(I_C_Invoice.COLUMNNAME_C_DocTypeTarget_ID)
-				);
-				Organization.Builder organizationBuilder = PaymentAllocationConvertUtil.convertOrganization(
-					rs.getInt(I_AD_Org.COLUMNNAME_AD_Org_ID)
-				);
-
-				Currency.Builder currencyBuilder = PaymentAllocationConvertUtil.convertCurrency(
-					rs.getString(I_C_Currency.COLUMNNAME_ISO_Code)
-				);
-
-				boolean isSalesTransaction = BooleanManager.getBooleanFromString(
-					rs.getString(I_C_Invoice.COLUMNNAME_IsSOTrx)
-				);
-				TransactionType.Builder transactionTypeBuilder = PaymentAllocationConvertUtil.convertTransactionType(
-					isSalesTransaction ? X_T_InvoiceGL.APAR_ReceivablesOnly : X_T_InvoiceGL.APAR_PayablesOnly
-				);
-
-				int invoiceId = rs.getInt(I_C_Invoice.COLUMNNAME_C_Invoice_ID);
-				Invoice.Builder invoiceBuilder = Invoice.newBuilder()
-					.setId(invoiceId)
-					// .setUuid(
-					// 	TextManager.getValidString(
-					// 		rs.getString(I_C_Invoice.COLUMNNAME_UUID)
-					// 	)
-					// )
-					.setDocumentNo(
-						TextManager.getValidString(
-							rs.getString(I_C_Invoice.COLUMNNAME_DocumentNo)
-						)
-					)
-					.setTargetDocumentType(
-						targetDocumentTypeBuilder
-					)
-					.setDateInvoiced(
-						TimeManager.getProtoTimestampFromTimestamp(
-							rs.getTimestamp(I_C_Invoice.COLUMNNAME_DateInvoiced)
-						)
-					)
-					.setIsSalesTransaction(isSalesTransaction)
-					.setDescription(
-						TextManager.getValidString(
-							rs.getString(I_C_Invoice.COLUMNNAME_Description)
-						)
-					)
-					.setOriginalAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("OriginalAmt")
-						)
-					)
-					.setConvertedAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("ConvertedAmt")
-						)
-					)
-					.setOpenAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("OpenAmt")
-						)
-					)
-					.setDiscountAmount(
-						NumberManager.getBigDecimalToString(
-							rs.getBigDecimal("DiscountAmt")
-						)
-					)
-					.setTransactionType(transactionTypeBuilder)
-					.setOrganization(organizationBuilder)
-					.setCurrency(currencyBuilder)
-				;
-
+				Invoice.Builder invoiceBuilder = PaymentAllocationConvertUtil.convertInvoiceAllocation(rs);
 				builderList.addRecords(invoiceBuilder);
 			}
 
 			builderList.setRecordCount(recordCount);
 		}
 		catch (SQLException e) {
-			log.log(Level.SEVERE, sql.toString(), e);
+			// log.log(Level.SEVERE, sql.toString(), e);
+			log.warning(e.getLocalizedMessage());
 		}
 		finally {
 			DB.close(rs, pstmt);
@@ -922,7 +819,7 @@ public class PaymentAllocationLogic {
 
 	public static ListLookupItemsResponse.Builder listCharges(ListChargesRequest request) {
 		// Charge
-		int columnId = 61804; // C_AllocationLine.C_Charge_ID
+		final int columnId = 61804; // C_AllocationLine.C_Charge_ID
 		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
 			0,
 			0, 0, 0,
@@ -946,7 +843,7 @@ public class PaymentAllocationLogic {
 
 	public static ListLookupItemsResponse.Builder listTransactionOrganizations(ListTransactionOrganizationsRequest request) {
 		// Organization to overwrite
-		int columnId = 3863; // C_Period.AD_Org_ID
+		final int columnId = 3863; // C_Period.AD_Org_ID
 		MLookupInfo reference = ReferenceInfo.getInfoFromRequest(
 			0,
 			0, 0, 0,
@@ -965,8 +862,78 @@ public class PaymentAllocationLogic {
 
 		return builderList;
 	}
+	
 
 
+
+	public static CalculateDifferenceResponse.Builder calculateDifference(CalculateDifferenceRequest request) {
+		final BigDecimal totalDifference = getDifferenceAmount(
+			request.getPaymentSelectionsList(),
+			request.getInvoiceSelectionsList()
+		);
+
+		CalculateDifferenceResponse.Builder builder = CalculateDifferenceResponse.newBuilder()
+			.setDifferenceAmount(
+				NumberManager.getBigDecimalToString(totalDifference)
+			)
+		;
+		return builder;
+	}
+
+
+	/**
+	 * Calculate difference amount between payment and invoice selections
+	 * Based on org.compiere.apps.form.Allocation.calculate()
+	 * @param paymentSelection List of selected payments
+	 * @param invoiceSelection List of selected invoices
+	 * @return Difference amount (totalPay - totalInv)
+	 */
+	public static BigDecimal getDifferenceAmount(List<PaymentSelection> paymentSelection, List<InvoiceSelection> invoiceSelection) {
+		BigDecimal totalPay = BigDecimal.ZERO;
+		BigDecimal totalInv = BigDecimal.ZERO;
+
+		// Sum payment applied amounts with multiplier
+		// Receipt (AR): positive amount
+		// Payment (AP): negative amount
+		if (paymentSelection != null) {
+			for (PaymentSelection payment : paymentSelection) {
+				BigDecimal appliedAmount = NumberManager.getBigDecimalFromString(
+					payment.getAppliedAmount()
+				);
+				if (appliedAmount != null) {
+					// Apply multiplier based on isReceipt
+					// If isReceipt = true (AR): multiplier = 1
+					// If isReceipt = false (AP): multiplier = -1
+					BigDecimal multiplier = payment.getIsReceipt() ? BigDecimal.ONE : BigDecimal.ONE.negate();
+					totalPay = totalPay.add(appliedAmount.multiply(multiplier));
+				}
+			}
+		}
+
+		// Sum invoice applied amounts with multiplier
+		// Sales Transaction (AR): positive amount
+		// Purchase Transaction (AP): negative amount
+		if (invoiceSelection != null) {
+			for (InvoiceSelection invoice : invoiceSelection) {
+				BigDecimal appliedAmount = NumberManager.getBigDecimalFromString(
+					invoice.getAppliedAmount()
+				);
+				if (appliedAmount != null) {
+					// TODO: Validate ARC, APC to credit memo as return
+					// Apply multiplier based on isSalesTransaction
+					// If isSalesTransaction = true (AR): multiplier = 1
+					// If isSalesTransaction = false (AP): multiplier = -1
+					BigDecimal multiplier = invoice.getIsSalesTransaction() ? BigDecimal.ONE : BigDecimal.ONE.negate();
+					totalInv = totalInv.add(appliedAmount.multiply(multiplier));
+				}
+			}
+		}
+
+		// Calculate difference: totalPay - totalInv
+		BigDecimal differenceAmount = totalPay.subtract(totalInv);
+
+		return differenceAmount;
+	}
 
 	public static Timestamp getTransactionDate(List<PaymentSelection> paymentSelection, List<InvoiceSelection> invoiceSelection) {
 		AtomicReference<Timestamp> transactionDateReference = new AtomicReference<Timestamp>();
@@ -988,12 +955,78 @@ public class PaymentAllocationLogic {
 		return transactionDateReference.get();
 	}
 
+
+	/**
+	 * Get the currency rate for the given conversion type and currencies.
+	 * Based on WAllocation.setCurrencyRate() / Allocation.getCurrencyRate()
+	 * @param currencyFromId source currency
+	 * @param currencyToId target currency
+	 * @param date conversion date
+	 * @param conversionTypeId conversion type to use
+	 * @return conversion rate, or ZERO if not found
+	 */
+	private static BigDecimal getCurrencyRate(int currencyFromId, int currencyToId, Timestamp date, int conversionTypeId) {
+		Properties ctx = Env.getCtx();
+		int clientId = Env.getAD_Client_ID(ctx);
+		BigDecimal rate = MConversionRate.getRate(
+			currencyFromId, currencyToId,
+			date, conversionTypeId,
+			clientId, 0
+		);
+		if (rate == null || rate.signum() == 0) {
+			return BigDecimal.ZERO;
+		}
+		return rate;
+	}
+
+
+	/**
+	 * Get the BPartner-specific conversion type ID
+	 */
+	private static int getBPartnerConversionTypeId(int businessPartnerId, String transactionName) {
+		MConversionType conversionType = new Query(
+			Env.getCtx(),
+			I_C_ConversionType.Table_Name,
+			"C_BPartner_ID = ?",
+			transactionName
+		)
+			.setParameters(businessPartnerId)
+			.setClient_ID()
+			.first()
+		;
+		if (conversionType != null && conversionType.getC_ConversionType_ID() > 0) {
+			return conversionType.getC_ConversionType_ID();
+		}
+		return 0;
+	}
+
+
+	/**
+	 * Get allocated amount for an invoice using a specific conversion type.
+	 * Mirrors MInvoice.getAllocatedAmt() but uses the specified conversion type
+	 * instead of COALESCE(i.C_ConversionType_ID, 0).
+	 */
+	private static BigDecimal getAllocatedAmtWithConversionType(
+		int invoiceId, int conversionTypeId, String transactionName
+	) {
+		String sql = "SELECT SUM(currencyConvert(al.Amount+al.DiscountAmt+al.WriteOffAmt,"
+			+ "ah.C_Currency_ID, i.C_Currency_ID, ah.DateTrx, ?, al.AD_Client_ID, al.AD_Org_ID)) "
+			+ "FROM C_AllocationLine al"
+			+ " INNER JOIN C_AllocationHdr ah ON (al.C_AllocationHdr_ID=ah.C_AllocationHdr_ID)"
+			+ " INNER JOIN C_Invoice i ON (al.C_Invoice_ID=i.C_Invoice_ID) "
+			+ "WHERE al.C_Invoice_ID=?"
+			+ " AND ah.IsActive='Y' AND al.IsActive='Y'"
+		;
+		return DB.getSQLValueBD(transactionName, sql, conversionTypeId, invoiceId);
+	}
+
+
 	public static ProcessResponse.Builder process(ProcessRequest request) {
 		// validate and get Organization
 		MOrg organization = validateAndGetOrganization(request.getTransactionOrganizationId());
 		Properties context = Env.getCtx();
 
-		AtomicReference<String> atomicStatus = new AtomicReference<String>();
+		AtomicReference<MAllocationHdr> atomicAllocation = new AtomicReference<MAllocationHdr>();
 		int windowNo = ThreadLocalRandom.current().nextInt(1, 8996 + 1);
 		Env.setContext(context, windowNo, I_AD_Org.COLUMNNAME_AD_Org_ID, request.getTransactionOrganizationId());
 
@@ -1002,6 +1035,34 @@ public class PaymentAllocationLogic {
 
 		// validate and get Currency
 		MCurrency currency = validateAndGetCurrency(request.getCurrencyId());
+
+		// Validate empty list
+		if ((request.getPaymentSelectionsList() == null || request.getPaymentSelectionsList().size() == 0)
+			&& (request.getInvoiceSelectionsList() == null || request.getInvoiceSelectionsList().size() == 0)) {
+			throw new AdempiereException("@UpdateSelection@: @C_Invoice_ID@ | @C_Payment_ID@");
+		}
+
+		// Validate duplicate payment IDs
+		Set<Integer> seenPaymentIds = new HashSet<>();
+		List<Integer> duplicatePaymentIds = request.getPaymentSelectionsList().stream()
+			.map(PaymentSelection::getId)
+			.filter(id -> !seenPaymentIds.add(id))
+			.distinct()
+			.collect(Collectors.toList());
+		if (!duplicatePaymentIds.isEmpty()) {
+			throw new AdempiereException("Duplicate payment IDs in selection: " + duplicatePaymentIds);
+		}
+
+		// Validate duplicate invoice IDs
+		Set<Integer> seenInvoiceIds = new HashSet<>();
+		List<Integer> duplicateInvoiceIds = request.getInvoiceSelectionsList().stream()
+			.map(InvoiceSelection::getId)
+			.filter(id -> !seenInvoiceIds.add(id))
+			.distinct()
+			.collect(Collectors.toList());
+		if (!duplicateInvoiceIds.isEmpty()) {
+			throw new AdempiereException("Duplicate invoice IDs in selection: " + duplicateInvoiceIds);
+		}
 
 		Trx.run(transactionName -> {
 			// transaction date
@@ -1016,14 +1077,24 @@ public class PaymentAllocationLogic {
 			}
 			transactionDate = TimeUtil.getDay(transactionDate); // Remove time mark
 
-			BigDecimal totalDifference = NumberManager.getBigDecimalFromString(
+			// TOOD: Calculate with getDifferenceAmount method
+			// BigDecimal totalDifference = getDifferenceAmount(
+			// 	request.getPaymentSelectionsList(),
+			// 	request.getInvoiceSelectionsList()
+			// );
+			final BigDecimal totalDifference = NumberManager.getBigDecimalFromString(
 				request.getTotalDifference()
 			);
-			String tableName =  request.getTableName();
-			int recordId = request.getRecordId();
-			String status = saveData(
+			final String tableName =  request.getTableName();
+			final int recordId = request.getRecordId();
+			final BigDecimal currencyRate = NumberManager.getBigDecimalFromString(
+				request.getCurrencyRate()
+			);
+			MAllocationHdr allocation = saveData(
 				windowNo, businessPartner.getC_BPartner_ID(),
-				currency.getC_Currency_ID(), request.getIsMultiCurrency(),
+				currency.getC_Currency_ID(),
+				request.getIsMultiCurrency(), request.getConversionTypeId(),
+				currencyRate,
 				organization.getAD_Org_ID(), transactionDate,
 				request.getChargeId(), request.getDescription(),
 				totalDifference,
@@ -1033,24 +1104,57 @@ public class PaymentAllocationLogic {
 				recordId,
 				transactionName
 			);
-			atomicStatus.set(status);
+
+			// Update conversion type name with the allocation document number
+			if (request.getIsMultiCurrency() && request.getConversionTypeId() > 0) {
+				if (allocation != null && allocation.getC_AllocationHdr_ID() > 0) {
+					MConversionType conversionType = new MConversionType(
+						allocation.getCtx(),
+						request.getConversionTypeId(),
+						transactionName
+					);
+					if (conversionType != null && conversionType.getC_ConversionType_ID() > 0) {
+						conversionType.setName(
+							conversionType.getName() + " " + allocation.getDocumentNo()
+						);
+						conversionType.saveEx(transactionName);
+					}
+				}
+			}
+
+			atomicAllocation.set(allocation);
 		});
 
-		return ProcessResponse.newBuilder()
-			.setMessage(
-				TextManager.getValidString(
-					Msg.parseTranslation(
-						context,
-						atomicStatus.get()
+		ProcessResponse.Builder builder = ProcessResponse.newBuilder();
+
+		MAllocationHdr paymentAllocarAllocation = atomicAllocation.get();
+		if (paymentAllocarAllocation != null && paymentAllocarAllocation.getC_AllocationHdr_ID() > 0) {
+			final String processMessage = Msg.parseTranslation(
+				context,
+				"@C_AllocationHdr_ID@ @Created@: " + paymentAllocarAllocation.getDocumentNo()
+			);
+			builder.setPaymentAllocationId(
+					paymentAllocarAllocation.getC_AllocationHdr_ID()
+				)
+				.setPaymentAllocationDocumentNo(
+					TextManager.getValidString(
+						paymentAllocarAllocation.getDocumentNo()
 					)
 				)
-			)
-		;
+				.setMessage(
+					TextManager.getValidString(
+						processMessage
+					)
+				)
+			;
+		}
+		return builder;
 	}
 
-	private static String saveData(
+	private static MAllocationHdr saveData(
 		int windowNo, int businessPartnerId,
-		int currencyId, boolean isMultiCurrency,
+		int currencyId,
+		boolean isMultiCurrency, int conversionTypeId, BigDecimal currencyRate,
 		int organizationId, Timestamp transactionDate,
 		int chargeId, String description,
 		BigDecimal totalDifference,
@@ -1061,7 +1165,7 @@ public class PaymentAllocationLogic {
 		String transactionName
 	) {
 		if (paymentSelection == null || invoiceSelection == null || (paymentSelection.size() + invoiceSelection.size() == 0)) {
-			return "";
+			return null;
 		}
 
 		if (organizationId <= 0) {
@@ -1092,19 +1196,40 @@ public class PaymentAllocationLogic {
 		}
 
 		//	Create Allocation manual
-		final String userName = Env.getContext(Env.getCtx(), "#AD_User_Name");
+		final String userNameAsDescription = Env.getContext(Env.getCtx(), "#AD_User_Name");
 		MAllocationHdr alloc = new MAllocationHdr(
 			Env.getCtx(),
 			true,
 			transactionDate,
 			currencyId,
-			userName,
+			userNameAsDescription,
 			transactionName
 		);
 		alloc.setAD_Org_ID(organizationId);
 		//	Set Description
 		if (!Util.isEmpty(description, true)) {
 			alloc.setDescription(description);
+		}
+
+		// Set multi-currency fields on allocation header (matching ZK Allocation.saveData behavior)
+		if (isMultiCurrency && conversionTypeId > 0) {
+			BigDecimal effectiveCurrencyRate = currencyRate;
+			if (effectiveCurrencyRate == null || effectiveCurrencyRate.signum() == 0) {
+				int schemaCurrencyId = MAcctSchema.get(
+					Env.getCtx(),
+					Env.getContextAsInt(Env.getCtx(), "$C_AcctSchema_ID")
+				).getC_Currency_ID();
+				effectiveCurrencyRate = getCurrencyRate(
+					currencyId, schemaCurrencyId,
+					transactionDate, conversionTypeId
+				);
+			}
+			if (effectiveCurrencyRate != null && effectiveCurrencyRate.signum() > 0) {
+				alloc.set_ValueOfColumn("CurrencyRate", effectiveCurrencyRate);
+			}
+
+			alloc.set_ValueOfColumn("IsMultiCurrency", isMultiCurrency);
+			alloc.set_ValueOfColumn("C_ConversionType_ID", conversionTypeId);
 		}
 
 		if (!Util.isEmpty(tableName,true) && recordId > 0) {
@@ -1146,9 +1271,10 @@ public class PaymentAllocationLogic {
 				PaymentSelection payment = paymentSelection.get(j);
 
 				int paymentId = payment.getId();
-				BigDecimal paymentAmt = NumberManager.getBigDecimalFromString(
-					payment.getAppliedAmount()
-				);
+				BigDecimal paymentAmt = amountList.get(j);
+				// BigDecimal paymentAmt = NumberManager.getBigDecimalFromString(
+				// 	payment.getAppliedAmount()
+				// );
 
 				// only match same sign (otherwise appliedAmt increases)
 				// and not zero (appliedAmt was checked earlier)
@@ -1168,7 +1294,7 @@ public class PaymentAllocationLogic {
 					aLine.setDocInfo(businessPartnerId, orderId, C_Invoice_ID);
 					aLine.setPaymentInfo(paymentId, cashLineId);
 					aLine.saveEx();
-					
+
 					// Apply Discounts and WriteOff only first time
 					DiscountAmt = Env.ZERO;
 					WriteOffAmt = Env.ZERO;
@@ -1185,7 +1311,7 @@ public class PaymentAllocationLogic {
 			// remainder will need to match against other invoices
 			else {
 				int C_Payment_ID = 0;
-				
+
 				//	Allocation Line
 				MAllocationLine aLine = new MAllocationLine(
 					alloc, AppliedAmt,
@@ -1199,7 +1325,6 @@ public class PaymentAllocationLogic {
 			}
 		} //	invoice loop
 
-		
 		// check for unapplied payment amounts (eg from payment reversals)
 		for (int i = 0; i < paymentList.size(); i++) {
 			BigDecimal payAmt = (BigDecimal) amountList.get(i);
@@ -1222,9 +1347,11 @@ public class PaymentAllocationLogic {
 
 		// check for charge amount
 		if (chargeId > 0 && unmatchedApplied.compareTo(BigDecimal.ZERO) != 0) {
+			// TODO: calculate correct  totalDiff
+			// BigDecimal totalDiff = getDifferenceAmount(paymentSelection, invoiceSelection);
 			// BigDecimal chargeAmt = totalDiff;
 			BigDecimal chargeAmt = BigDecimal.ZERO;
-		
+
 			//	Allocation Line
 			MAllocationLine aLine = new MAllocationLine(
 				alloc,
@@ -1238,9 +1365,9 @@ public class PaymentAllocationLogic {
 		}
 
 		if (unmatchedApplied.signum() != 0) {
-			log.log(Level.SEVERE, "Allocation not balanced -- out by " + unmatchedApplied);
+			log.severe("Allocation not balanced -- out by " + unmatchedApplied);
 		}
-		
+
 		//	Should start WF
 		if (alloc.get_ID() > 0) {
 			if (!alloc.processIt(DocAction.ACTION_Complete)) {
@@ -1249,35 +1376,81 @@ public class PaymentAllocationLogic {
 			alloc.saveEx();
 		}
 
+		// Determine the effective conversion type for multi-currency IsPaid check
+		int effectiveConvTypeId = conversionTypeId;
+		if (effectiveConvTypeId <= 0) {
+			effectiveConvTypeId = getBPartnerConversionTypeId(businessPartnerId, transactionName);
+		}
+
 		//  Test/Set IsPaid for Invoice - requires that allocation is posted
 		for (InvoiceSelection invoice : invoiceSelection) {
 			//  Invoice variables
-			int C_Invoice_ID = invoice.getId();
-			String sql = "SELECT invoiceOpen(C_Invoice_ID, 0) "
-				+ "FROM C_Invoice "
-				+ "WHERE C_Invoice_ID = ?"
-			;
-			BigDecimal open = DB.getSQLValueBD(transactionName, sql, C_Invoice_ID);
-			if (open != null && open.signum() == 0) {
-				sql = "UPDATE C_Invoice SET IsPaid='Y' "
-					+ "WHERE C_Invoice_ID=" + C_Invoice_ID;
-				int no = DB.executeUpdate(sql, transactionName);
-				log.config("Invoice #" + C_Invoice_ID + " is paid - updated=" + no);
-			}
-			else {
-				log.config("Invoice #" + C_Invoice_ID + " is not paid - " + open);
+			final int C_Invoice_ID = invoice.getId();
+			MInvoice inv = new MInvoice(Env.getCtx(), C_Invoice_ID, transactionName);
+			// Determine the effective conversion type for multi-currency IsPaid check
+			if (isMultiCurrency && effectiveConvTypeId > 0 && currencyId != inv.getC_Currency_ID()) {
+				// Multi-currency: use BPartner/negotiated conversion type
+				BigDecimal allocatedAmt = getAllocatedAmtWithConversionType(
+					C_Invoice_ID, effectiveConvTypeId, transactionName
+				);
+				if (allocatedAmt == null) {
+					allocatedAmt = Env.ZERO;
+				}
+				BigDecimal total = inv.getGrandTotal();
+				if (!inv.isSOTrx()) {
+					total = total.negate();
+				}
+				if (inv.isCreditMemo()) {
+					total = total.negate();
+				}
+				if (total.compareTo(allocatedAmt) == 0 && !inv.isPaid()) {
+					inv.setIsPaid(true);
+					inv.saveEx(transactionName);
+					log.config("Invoice #" + C_Invoice_ID + " is paid (multi-currency)");
+				} else {
+					log.config("Invoice #" + C_Invoice_ID + " is not paid - allocated=" + allocatedAmt + ", total=" + total);
+				}
+			} else {
+				// String sql = "SELECT invoiceOpen(C_Invoice_ID, 0) "
+				// 	+ "FROM C_Invoice "
+				// 	+ "WHERE C_Invoice_ID = ?"
+				// ;
+				// BigDecimal open = DB.getSQLValueBD(transactionName, sql, C_Invoice_ID);
+				// if (open != null && open.signum() == 0) {
+				// 	sql = "UPDATE C_Invoice SET IsPaid='Y' "
+				// 		+ "WHERE C_Invoice_ID=" + C_Invoice_ID
+				// 	;
+				// 	int no = DB.executeUpdate(sql, transactionName);
+				// 	log.config("Invoice #" + C_Invoice_ID + " is paid - updated=" + no);
+				// }
+				// else {
+				// 	log.config("Invoice #" + C_Invoice_ID + " is not paid - " + open);
+				// }
+
+				// Single currency: use standard testAllocation
+				if (inv.testAllocation()) {
+					inv.saveEx(transactionName);
+					log.config("Invoice #" + C_Invoice_ID + " is paid");
+				}
+				else {
+					log.config("Invoice #" + C_Invoice_ID + " is not paid");
+				}
 			}
 		}
-		
+
 		//  Test/Set Payment is fully allocated
 		for (PaymentSelection payment : paymentSelection) {
 		// for (int i = 0; i < paymentList.size(); i++) {
-			int paymentId = payment.getId();
+			final int paymentId = payment.getId();
 			MPayment pay = new MPayment(
 				Env.getCtx(),
 				paymentId,
 				transactionName
 			);
+			// Set conversion type on payment when multi-currency
+			if (isMultiCurrency && effectiveConvTypeId > 0) {
+				pay.setC_ConversionType_ID(effectiveConvTypeId);
+			}
 			if (pay.testAllocation()) {
 				pay.saveEx();
 			}
@@ -1290,7 +1463,7 @@ public class PaymentAllocationLogic {
 		paymentList.clear();
 		amountList.clear();
 
-		return Msg.parseTranslation(Env.getCtx(), "@C_AllocationHdr_ID@ @Created@: " + alloc.getDocumentNo());
+		return alloc;
 	}
 
 }

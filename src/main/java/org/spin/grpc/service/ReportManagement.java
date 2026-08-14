@@ -672,7 +672,8 @@ public class ReportManagement extends ReportManagementImplBase {
 				null
 			)
 				.setParameters(request.getPrintFormatId())
-				.first();
+				.first()
+			;
 		}
 		//	Get Default
 		if(printFormat == null || printFormat.getAD_PrintFormat_ID() <= 0) {
@@ -682,7 +683,31 @@ public class ReportManagement extends ReportManagementImplBase {
 		}
 		//	Validate print format
 		if(printFormat == null || printFormat.getAD_PrintFont_ID() <= 0) {
-			throw new AdempiereException("@AD_PrintFormat_ID@ @NotFound@");
+			throw new AdempiereException("@AD_PrintFormat_ID@ (" + request.getPrintFormatId() + ") @NotFound@");
+		}
+
+		//	As ReportEngine.get() logic: if the print format has no items,
+		//	delete it and recreate from the report view (preferred) or from the table.
+		if(printFormat.getItemCount() == 0) {
+			log.warning("No Items - recreating: " + printFormat);
+			int reportViewId = printFormat.getAD_ReportView_ID();
+			int tableId = printFormat.getAD_Table_ID();
+			String printFormatName = printFormat.getName();
+			printFormat.delete(true); // Delete old print format
+			MPrintFormat recreatedPrintFormat = null;
+			if(reportViewId > 0) {
+				recreatedPrintFormat = MPrintFormat.createFromReportView(
+					Env.getCtx(),
+					reportViewId,
+					printFormatName
+				);
+			} else if(tableId > 0) {
+				recreatedPrintFormat = MPrintFormat.createFromTable(Env.getCtx(), tableId);
+			}
+			if (recreatedPrintFormat == null || recreatedPrintFormat.getAD_PrintFormat_ID() <= 0) {
+				throw new AdempiereException("@AD_PrintFormat_ID@ @NotFound@");
+			}
+			printFormat = recreatedPrintFormat;
 		}
 
 		if (table == null || table.getAD_Table_ID() != printFormat.getAD_Table_ID()) {
@@ -728,6 +753,9 @@ public class ReportManagement extends ReportManagementImplBase {
 			.setReportType(reportType)
 			.setIsDirectPrint(
 				process.isDirectPrint()
+			)
+			.setPrintFormatId(
+				printFormat.getAD_PrintFormat_ID()
 			)
 		;
 		//	
@@ -931,10 +959,7 @@ public class ReportManagement extends ReportManagementImplBase {
 		List<Object> parameters = new ArrayList<>();
 		//	For Table Name
 		if(!Util.isEmpty(request.getTableName(), true)) {
-			MTable table = MTable.get(Env.getCtx(), request.getTableName());
-			if (table == null || table.getAD_Table_ID() <= 0) {
-				throw new AdempiereException("@TableName@ @NotFound@");
-			}
+			MTable table = RecordUtil.validateAndGetTable(request.getTableName());
 			whereClause = "AD_Table_ID = ? "
 				+ "OR EXISTS ("
 					+ "SELECT 1 FROM AD_PrintFormat AS pf "
@@ -950,9 +975,19 @@ public class ReportManagement extends ReportManagementImplBase {
 			whereClause = "EXISTS("
 					+ "SELECT 1 FROM AD_Process AS p "
 					+ "WHERE p.AD_Process_ID = ? "
-					+ "AND (p.AD_PrintFormat_ID = AD_PrintFormat.AD_PrintFormat_ID "
-					+ "OR p.AD_ReportView_ID = AD_PrintFormat.AD_ReportView_ID) "
 					+ "AND p.IsActive = 'Y' "
+					+ "AND ("
+						+ "p.AD_PrintFormat_ID = AD_PrintFormat.AD_PrintFormat_ID "
+						+ "OR p.AD_ReportView_ID = AD_PrintFormat.AD_ReportView_ID "
+						+ "OR AD_PrintFormat.AD_Table_ID = ("
+							+ "SELECT AD_Table_ID FROM AD_PrintFormat "
+							+ "WHERE AD_PrintFormat_ID = p.AD_PrintFormat_ID"
+						+ ") "
+						+ "OR AD_PrintFormat.AD_Table_ID = ("
+							+ "SELECT AD_Table_ID FROM AD_ReportView "
+							+ "WHERE AD_ReportView_ID = p.AD_ReportView_ID"
+						+ ")"
+					+ ")"
 				+ ")"
 			;
 			parameters.add(request.getReportId());

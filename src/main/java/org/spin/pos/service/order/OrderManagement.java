@@ -162,6 +162,8 @@ public class OrderManagement {
 		} else {
 			log.info("CPOS.SetC_BPartner_ID -" + partner);
 			order.setBPartner(partner);
+			//	Payment Term from POS (overrides the one derived from the Business Partner / default payment term)
+			OrderUtil.setPaymentTermFromPOS(pos, order);
 			AtomicBoolean priceListIsChanged = new AtomicBoolean(false);
 			if(partner.getM_PriceList_ID() > 0 && pos.get_ValueAsBoolean(ColumnsAdded.COLUMNNAME_IsKeepPriceFromCustomer)) {
 				MPriceList businesPartnerPriceList = MPriceList.get(Env.getCtx(), partner.getM_PriceList_ID(), null);
@@ -453,6 +455,55 @@ public class OrderManagement {
 		payment.saveEx(transactionName);
 	}
 
+	public static void createPaymentInZeroForCreditMemo(MInvoice creditMemo, int orderId, MPOS pos, String transactionName) {
+		BigDecimal paymentAmount = BigDecimal.ZERO;
+		int currencyId = creditMemo.getC_Currency_ID();
+		MPayment payment = new MPayment(Env.getCtx(), 0, transactionName);
+		payment.setC_BankAccount_ID(pos.getC_BankAccount_ID());
+		PO paymentTypeAllocation = POS.getPaymentMethodAllocationFromTenderType(pos.getC_POS_ID(), MPayment.TENDERTYPE_CreditMemo);
+		if (paymentTypeAllocation == null) {
+			throw new AdempiereException("@C_POSPaymentTypeAllocation_ID@ @NotFound@");
+		}
+		//	Payment Method
+		int paymentMethodId = paymentTypeAllocation.get_ValueAsInt(I_C_PaymentMethod.COLUMNNAME_C_PaymentMethod_ID);
+		payment.setC_PaymentMethod_ID(paymentMethodId);
+		//	Document Type
+		String documentTypeColumnName = "POSCollectingDocumentType_ID";
+		int documentTypeId = pos.get_ValueAsInt(documentTypeColumnName);
+		if(paymentTypeAllocation.get_ValueAsInt("C_DocTypeTarget_ID") > 0) {
+			documentTypeId = paymentTypeAllocation.get_ValueAsInt("C_DocTypeTarget_ID");
+		}
+		if(documentTypeId > 0) {
+			payment.setC_DocType_ID(documentTypeId);
+		} else {
+			payment.setC_DocType_ID(true);
+		}
+		payment.setC_Order_ID(orderId);
+		payment.setAD_Org_ID(creditMemo.getAD_Org_ID());
+		payment.setDateTrx(creditMemo.getDateInvoiced());
+		payment.setDateAcct(creditMemo.getDateAcct());
+		payment.setTenderType(MPayment.TENDERTYPE_CreditMemo);
+		payment.setDescription(creditMemo.getDescription());
+		payment.setC_BPartner_ID (creditMemo.getC_BPartner_ID());
+		payment.setC_Currency_ID(currencyId);
+		payment.setC_POS_ID(pos.getC_POS_ID());
+		if(creditMemo.getSalesRep_ID() > 0) {
+			payment.set_ValueOfColumn("CollectingAgent_ID", creditMemo.getSalesRep_ID());
+		}
+		if(pos.get_ValueAsInt(I_C_ConversionType.COLUMNNAME_C_ConversionType_ID) > 0) {
+			payment.setC_ConversionType_ID(pos.get_ValueAsInt(I_C_ConversionType.COLUMNNAME_C_ConversionType_ID));
+		}
+		payment.setPayAmt(paymentAmount);
+		payment.setDocStatus(MPayment.DOCSTATUS_Drafted);
+		payment.set_ValueOfColumn(ColumnsAdded.COLUMNNAME_ECA14_Invoice_Reference_ID, creditMemo.get_ID());
+		payment.setR_PnRef(creditMemo.getDocumentNo());
+		payment.setDocumentNo(creditMemo.getDocumentNo());
+		payment.setCheckNo(creditMemo.getDocumentNo());
+		//payment.setC_Invoice_ID(creditMemo.get_ID());
+		CashUtil.setCurrentDate(payment);
+		payment.saveEx(transactionName);
+	}
+
 	private static void setDefaultValuesFromPOS(MPOS pos, MOrder salesOrder) {
 		salesOrder.setM_PriceList_ID(pos.getM_PriceList_ID());
 		salesOrder.setM_Warehouse_ID(pos.getM_Warehouse_ID());
@@ -476,6 +527,8 @@ public class OrderManagement {
 		if(pos.get_ValueAsInt(MOrder.COLUMNNAME_C_ConversionType_ID) > 0) {
 			salesOrder.setC_ConversionType_ID(pos.get_ValueAsInt(MOrder.COLUMNNAME_C_ConversionType_ID));
 		}
+		//	Payment Term from POS (overrides the one derived from the Business Partner / default payment term)
+		OrderUtil.setPaymentTermFromPOS(pos, salesOrder);
 	}
 
 	/**
@@ -665,7 +718,7 @@ public class OrderManagement {
 	public static void processPayments(MOrder salesOrder, MPOS pos, boolean isOpenRefund, String transactionName) {
 		//	Get invoice if exists
 		int invoiceId = salesOrder.getC_Invoice_ID();
-		AtomicReference<BigDecimal> openAmount = new AtomicReference<BigDecimal>(OrderUtil.getTotalOpenAmount(salesOrder));
+		AtomicReference<BigDecimal> openAmount = new AtomicReference<BigDecimal>(salesOrder.getGrandTotal());
 		AtomicReference<BigDecimal> currentAmount = new AtomicReference<BigDecimal>(salesOrder.getGrandTotal());
 		List<Integer> paymentsIds = new ArrayList<Integer>();
 		//	Complete Payments
@@ -958,12 +1011,6 @@ public class OrderManagement {
 		//	Set values
 		orderLine.setTax();
 		orderLine.saveEx(transactionName);
-		//	Apply Discount from order
-		DiscountManagement.configureDiscountRateOff(
-			order,
-			(BigDecimal) order.get_Value("FlatDiscount"),
-			transactionName
-		);
 
 		return orderLine;
 	} // UpdateLine

@@ -15,6 +15,7 @@
  *************************************************************************************/
 package org.spin.base.util;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +58,33 @@ public class ReferenceUtil {
 	private Properties context;
 	/**	Local cache	*/
 	private Map<String, ReferenceInfo> referenceInfoMap;
+
+	public static final List<Integer> REFERENCES_DECIMALS = Arrays.asList(
+		DisplayType.Amount,
+		DisplayType.CostPrice,
+		DisplayType.Number,
+		DisplayType.Quantity
+	);
+
+	public static final List<Integer> REFERENCES_AMOUNT = Arrays.asList(
+		DisplayType.Amount,
+		DisplayType.CostPrice,
+		DisplayType.Number
+	);
+
+	public static final List<Integer> REFERENCES_QUANTITY = Arrays.asList(
+		DisplayType.Amount,
+		DisplayType.CostPrice,
+		DisplayType.Integer,
+		DisplayType.Number,
+		DisplayType.Quantity
+	);
+
+	public static final List<Integer> REFERENCES_CURRENCY = Arrays.asList(
+		DisplayType.Amount,
+		DisplayType.CostPrice
+	);
+
 	
 	public static ReferenceUtil getInstance(Properties context) {
 		if(instance == null) {
@@ -128,6 +156,8 @@ public class ReferenceUtil {
 		}
 		return newDisplayType;
 	}
+
+
 
 	/**
 	 * Get Reference information, can return null if reference is invalid or not exists
@@ -648,9 +678,23 @@ public class ReferenceUtil {
 			null
 		);
 		if(reference.getValidationType().equals(X_AD_Reference.VALIDATIONTYPE_TableValidation)) {
-			lookupInformation = MLookupFactory.getLookupInfo(Env.getCtx(), 0, 0, DisplayType.Search, Language.getLanguage(Env.getAD_Language(Env.getCtx())), null, reference.getAD_Reference_ID(), false, null, false);
+			lookupInformation = MLookupFactory.getLookupInfo(
+				Env.getCtx(),
+				0,
+				0,
+				DisplayType.Search,
+				Language.getLanguage(Env.getAD_Language(Env.getCtx())),
+				null,
+				reference.getAD_Reference_ID(),
+				false,
+				null,
+				false
+			);
 		} else if(reference.getValidationType().equals(X_AD_Reference.VALIDATIONTYPE_ListValidation)) {
-			lookupInformation = MLookupFactory.getLookup_List(Language.getLanguage(Env.getAD_Language(Env.getCtx())), reference.getAD_Reference_ID());
+			lookupInformation = MLookupFactory.getLookup_List(
+				Language.getLanguage(Env.getAD_Language(Env.getCtx())),
+				reference.getAD_Reference_ID()
+			);
 		}
 		return lookupInformation;
 	}
@@ -713,7 +757,18 @@ public class ReferenceUtil {
 	 * @return
 	 */
 	private static MLookupInfo getLookupInfoFromColumnName(String columnName) {
-		return MLookupFactory.getLookupInfo(Env.getCtx(), 0, 0, DisplayType.TableDir, Language.getLanguage(Env.getAD_Language(Env.getCtx())), columnName, 0, false, null, false);
+		return MLookupFactory.getLookupInfo(
+			Env.getCtx(),
+			0,
+			0,
+			DisplayType.TableDir,
+			Language.getLanguage(Env.getAD_Language(Env.getCtx())),
+			columnName,
+			0,
+			false,
+			null,
+			false
+		);
 	}
 
 }

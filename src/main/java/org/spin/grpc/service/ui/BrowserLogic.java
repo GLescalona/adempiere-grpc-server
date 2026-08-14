@@ -18,7 +18,6 @@ package org.spin.grpc.service.ui;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
-import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -45,6 +44,7 @@ import org.compiere.model.MRole;
 import org.compiere.model.MTable;
 import org.compiere.model.PO;
 import org.compiere.process.ProcessInfo;
+import org.compiere.util.CCache;
 import org.compiere.util.CLogger;
 import org.compiere.util.DB;
 import org.compiere.util.DisplayType;
@@ -65,6 +65,9 @@ import org.spin.base.db.WhereClauseUtil;
 import org.spin.base.util.AccessUtil;
 import org.spin.base.util.ContextManager;
 import org.spin.base.util.ConvertUtil;
+import org.spin.base.util.LookupUtil;
+import org.spin.base.util.RecordWriteGuard;
+import org.spin.base.util.ReferenceUtil;
 import org.spin.dictionary.util.DictionaryUtil;
 import org.spin.service.grpc.authentication.SessionManager;
 import org.spin.service.grpc.util.base.RecordUtil;
@@ -73,6 +76,7 @@ import org.spin.service.grpc.util.db.LimitUtil;
 import org.spin.service.grpc.util.db.ParameterUtil;
 import org.spin.service.grpc.util.query.Filter;
 import org.spin.service.grpc.util.query.FilterManager;
+import org.spin.service.grpc.util.value.BooleanManager;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
 import org.spin.service.grpc.util.value.TimeManager;
@@ -88,6 +92,8 @@ import com.google.protobuf.Value;
 public class BrowserLogic {
 
 	private static CLogger log = CLogger.getCLogger(BrowserLogic.class);
+
+	public static CCache<Integer, LinkedHashMap<String, MBrowseField>> fieldsMapCache = new CCache<Integer, LinkedHashMap<String, MBrowseField>>("Browser_Fields_Map", 30, 0);	//	no time-out
 
 
 	public static String getSearchProcessInstaceWhere(Properties context, int browserId, int searchProcessId, String tableName, int recordId, String filters) {
@@ -158,7 +164,12 @@ public class BrowserLogic {
 				index = columnSql.lastIndexOf(".");
 				parameterName = columnSql.substring(index +1);
 				String searchString = parameterName;
-				maybeParameter = searchProcessParameters.stream().filter(param -> param.getColumnName().equals(searchString)).findFirst();
+				maybeParameter = searchProcessParameters.stream()
+					.filter(param -> {
+						return param.getColumnName().equals(searchString);
+					})
+					.findFirst()
+				;
 				if (maybeParameter.isEmpty()) {
 					continue;
 				}
@@ -171,18 +182,16 @@ public class BrowserLogic {
 				if (!isRange && !operatorName.equalsIgnoreCase(Filter.EQUAL)) {
 					continue;
 				}
-				//Ensure the value is Timestamp when parameter should be Date
-				if(maybeParameter.get().getAD_Reference_ID() == DisplayType.Date
-					|| maybeParameter.get().getAD_Reference_ID() == DisplayType.DateTime){
-
+				// Ensure the value is Timestamp when parameter should be Date
+				if(DisplayType.isDate(maybeParameter.get().getAD_Reference_ID())) {
 					if (value instanceof List<?>) {
-						((List<Object>) value).replaceAll(TimeManager::getTimestampFromObject);
+						List<Object> newList = new ArrayList<>((List<?>) value);
+						newList.replaceAll(TimeManager::getTimestampFromObject);
+						value = newList;
 					} else {
 						value = TimeManager.getTimestampFromObject(value);
 					}
-
 				}
-
 				parametersToAdd.put(parameterName, value);
 			}
 			if (isRange && parametersMap.containsKey(columnName + "_To")) {
@@ -286,7 +295,8 @@ public class BrowserLogic {
 			.parallelStream()
 			.forEach(condition -> {
 				parametersMap.put(condition.getColumnName(), condition.getValue());
-			});
+			})
+		;
 
 		//	Fill context
 		final int windowNo = ThreadLocalRandom.current().nextInt(1, 8996 + 1);
@@ -326,7 +336,8 @@ public class BrowserLogic {
 				tableNameAlias,
 				MRole.SQL_FULLYQUALIFIED,
 				MRole.SQL_RO
-			);
+			)
+		;
 
 		StringBuffer whereClause = new StringBuffer();
 		String where = browser.getWhereClause();
@@ -339,7 +350,8 @@ public class BrowserLogic {
 			}
 			whereClause
 				.append(" AND ")
-				.append(parsedWhereClause);
+				.append(parsedWhereClause)
+			;
 		}
 
 		// Add Process Instance ID validation
@@ -414,12 +426,19 @@ public class BrowserLogic {
 		ResultSet rs = null;
 
 		try {
-			LinkedHashMap<String, MBrowseField> fieldsMap = new LinkedHashMap<>();
-			//	Add field to map
-			List<MBrowseField> browseFieldsList = browser.getFields();
-			for(MBrowseField field: browseFieldsList) {
-				fieldsMap.put(field.getAD_View_Column().getColumnName().toUpperCase(), field);
+			LinkedHashMap<String, MBrowseField> fieldsMap = fieldsMapCache.get(browser.getAD_Browse_ID());
+			if (fieldsMap ==  null || fieldsMap.isEmpty()) {
+				fieldsMap = new LinkedHashMap<>();
+				List<MBrowseField> browseFieldsList = browser.getFields();
+				//	Add field to map
+				for(MBrowseField field: browseFieldsList) {
+					fieldsMap.put(
+						field.getAD_View_Column().getColumnName().toUpperCase(),
+						field
+					);
+				}
 			}
+
 			//	SELECT Key, Value, Name FROM ...
 			pstmt = DB.prepareStatement(sql, null);
 			ParameterUtil.setParametersFromObjectsList(pstmt, parameters);
@@ -445,30 +464,85 @@ public class BrowserLogic {
 				}
 				for (int index = 1; index <= metaData.getColumnCount(); index++) {
 					try {
-						String columnName = metaData.getColumnName(index);
-						MBrowseField field = fieldsMap.get(columnName.toUpperCase());
+						final String columnNameMetadata = metaData.getColumnName(index);
+						MBrowseField field = fieldsMap.get(columnNameMetadata.toUpperCase());
 						//	Display Columns
 						if(field == null) {
-							String displayValue = rs.getString(index);
-							Value.Builder displayValueBuilder = ValueManager.getProtoValueFromObject(displayValue);
+							final String displayValue = rs.getString(index);
+							Value.Builder displayValueBuilder = TextManager.getProtoValueFromString(displayValue);
 
 							rowValues.putFields(
-								columnName,
+								columnNameMetadata,
 								displayValueBuilder.build()
 							);
 							continue;
 						}
 						//	From field
-						String fieldColumnName = field.getAD_View_Column().getColumnName();
+						final int displayTypeId = field.getAD_Reference_ID();
+						final String columnName = field.getAD_View_Column().getColumnName();
 						Object value = rs.getObject(index);
 						Value.Builder valueBuilder = ValueManager.getProtoValueFromObject(
 							value,
-							field.getAD_Reference_ID()
+							displayTypeId
 						);
 						rowValues.putFields(
-							fieldColumnName,
+							columnName,
 							valueBuilder.build()
 						);
+
+						// Add custom display values
+						if (DisplayType.isDate(displayTypeId)) {
+							final String displayValue = TimeManager.getDisplayValue(
+								value,
+								displayTypeId
+							);
+							Value.Builder displayValueBuilder = TextManager.getProtoValueFromString(
+								displayValue
+							);
+							rowValues.putFields(
+								LookupUtil.DISPLAY_COLUMN_KEY + "_" + columnName,
+								displayValueBuilder.build()
+							);
+						}  else if (DisplayType.isNumeric(displayTypeId)) {
+							if (ReferenceUtil.REFERENCES_CURRENCY.contains(displayTypeId)) {
+								// final String displayValue = NumberManager.getDisplayValueWithCurrencyFromObject(
+								// 	value,
+								// 	displayTypeId,
+								// 	recordCurrencyId
+								// );
+								// Value.Builder displayValueBuilder = TextManager.getProtoValueFromString(
+								// 	displayValue
+								// );
+								// rowValues.putFields(
+								// 	LookupUtil.DISPLAY_COLUMN_KEY + "_" + columnName,
+								// 	displayValueBuilder.build()
+								// );
+							}
+							else if (ReferenceUtil.REFERENCES_DECIMALS.contains(displayTypeId)) {
+								final String displayValue = NumberManager.getDisplayValue(
+									value,
+									displayTypeId
+								);
+								Value.Builder displayValueBuilder = TextManager.getProtoValueFromString(
+									displayValue
+								);
+								rowValues.putFields(
+									LookupUtil.DISPLAY_COLUMN_KEY + "_" + columnName,
+									displayValueBuilder.build()
+								);
+							}
+						} else if (DisplayType.YesNo == displayTypeId) {
+							final String displayValue = BooleanManager.getDisplayValue(
+								value
+							);
+							Value.Builder displayValueBuilder = TextManager.getProtoValueFromString(
+								displayValue
+							);
+							rowValues.putFields(
+								LookupUtil.DISPLAY_COLUMN_KEY + "_" + columnName,
+								displayValueBuilder.build()
+							);
+						}
 					} catch (Exception e) {
 						log.severe(e.getLocalizedMessage());
 					}
@@ -781,17 +855,27 @@ public class BrowserLogic {
 			throw new AdempiereException("No Table defined in the Smart Browser");
 		}
 		final MTable table = MTable.get(context, browser.getAD_Table_ID());
+		if (RecordWriteGuard.isTableReadOnly(table)) {
+			throw new AdempiereException("@Ignored@ @AD_Table_ID@ (" + table.getName() + ") : @IsView@");
+		}
 
 		PO entity = RecordUtil.getEntity(context, table.getAD_Table_ID(), null, request.getRecordId(), null);
 		if (entity == null || entity.get_ID() <= 0) {
-			// Return
+			log.warning("@Ignored@ @PO@ (" + request.getRecordId() + ") : @NotFound@");
 			return ConvertUtil.convertEntity(entity);
+		}
+		if (RecordWriteGuard.isForeignClient(context, entity)) {
+			throw new AdempiereException("@Ignored@ : Record is other client");
 		}
 
 		MView view = new MView(context, browser.getAD_View_ID());
 		List<MViewColumn> viewColumnsList = view.getViewColumns();
 
-		request.getAttributes().getFieldsMap().entrySet().parallelStream().forEach(attribute -> {
+		request.getAttributes().getFieldsMap().entrySet().stream().forEach(attribute -> {
+			if (attribute == null || Util.isEmpty(attribute.getKey(), true)) {
+				log.warning("@Ignored@ : Attribute key is empty");
+				return;
+			}
 			// find view column definition
 			MViewColumn viewColumn = viewColumnsList
 				.parallelStream()
@@ -803,34 +887,39 @@ public class BrowserLogic {
 			;
 			// if view aliases not exists, next element
 			if (viewColumn == null || viewColumn.getAD_View_Column_ID() <= 0) {
+				log.warning("@AD_View_Column_ID@ (" + attribute.getKey() + ") @NotFound@");
 				return;
 			}
 
 			MViewDefinition viewDefinition = MViewDefinition.get(context, viewColumn.getAD_View_Definition_ID());
 			// not same table setting in smart browser and view definition
 			if (browser.getAD_Table_ID() != viewDefinition.getAD_Table_ID()) {
-				log.info("Browse Table " + browser.getAD_Table_ID() + " and View Definition Table " + viewDefinition.getAD_Table_ID() + " different ");
+				log.warning("@AD_Browse_ID@ @AD_Table_ID@ (" + browser.getAD_Table_ID() + ") and @AD_View_Definition_ID@ @AD_Table_ID@ " + viewDefinition.getAD_Table_ID() + " different ");
 				return;
 			}
 
 			MBrowseField browseField = MBrowseField.get(browser, viewColumn);
 			if (browseField == null || browseField.getAD_Browse_Field_ID() <= 0) {
-				log.warning("Browse Field no found");
+				log.warning("@AD_Browse_Field_ID@ (" + viewColumn.getColumnName() + ") @NotFound@");
 				return;
 			}
 			if (!browseField.isActive() || browseField.isReadOnly()) {
-				log.warning("Browse Field not updateable: " + browseField.getName());
+				log.warning("@AD_Browse_Field_ID@ not updateable: " + browseField.getName());
 				return;
 			}
 
 			MColumn column = MColumn.get(browser.getCtx(), viewColumn.getAD_Column_ID());
 			if (column == null || column.getAD_Column_ID() <= 0) {
+				log.warning("@AD_Column_ID@ (" + viewColumn.getAD_Column_ID() + ") @NotFound@");
 				// column is not present on current table
 				return;
 			}
-			if (column.isVirtualColumn() || column.isKey() || !column.isUpdateable()) {
-				// virtual column with columnSQL
-				log.warning("Column is virtual column or not updateable: " + column.getColumnName());
+			if (column.isVirtualColumn() || column.isKey()) {
+				log.warning("@AD_Column_ID@ (" + column.getAD_Column_ID() + ") is virtual or @KeyColumn@: " + column.getColumnName());
+				return;
+			}
+			if (RecordWriteGuard.shouldSkipColumn(entity, column)) {
+				log.warning("@Ignored@ " + column.getColumnName() + " : @NotAllowed@");
 				return;
 			}
 			String columnName = column.getColumnName();

@@ -49,6 +49,7 @@ import org.spin.backend.grpc.pos.ReverseSalesRequest;
 import org.spin.backend.grpc.pos.UpdateManualOrderRequest;
 import org.spin.backend.grpc.pos.UpdateOrderLineRequest;
 import org.spin.backend.grpc.pos.UpdateOrderRequest;
+import org.compiere.model.MDocType;
 import org.spin.base.util.DocumentUtil;
 import org.spin.grpc.service.TimeControl;
 import org.spin.pos.service.cash.CashManagement;
@@ -184,8 +185,8 @@ public class OrderServiceLogic {
 					Env.getCtx(),
 					request.getDiscountSchemaId()
 				);
-				// discountRateOff = discountSchema.getFlatDiscount();
-				DiscountManagement.configureDiscount(salesOrder, discountSchema.getFlatDiscount(), transactionName);
+				salesOrder.set_ValueOfColumn("FlatDiscount", discountSchema.getFlatDiscount());
+				salesOrder.saveEx(transactionName);
 			}
 			if(discountRateOff != null) {
 				DiscountManagement.configureDiscountRateOff(salesOrder, discountRateOff, transactionName);
@@ -395,12 +396,6 @@ public class OrderServiceLogic {
 
 				//	Save Line
 				orderLine.saveEx(transactionName);
-				//	Apply Discount from order
-				DiscountManagement.configureDiscountRateOff(
-					order,
-					(BigDecimal) order.get_Value("FlatDiscount"),
-					transactionName
-				);
 				orderLineReference.set(orderLine);
 			}
 		});
@@ -477,12 +472,6 @@ public class OrderServiceLogic {
 				orderLine.setTax();
 				//	Save Line
 				orderLine.saveEx(transactionName);
-				//	Apply Discount from order
-				DiscountManagement.configureDiscountRateOff(
-					order,
-					(BigDecimal) order.get_Value("FlatDiscount"),
-					transactionName
-				);
 				orderLineReference.set(orderLine);
 			}
 		});
@@ -552,12 +541,6 @@ public class OrderServiceLogic {
 			}
 			OrderManagement.validateOrderReleased(order);
 			orderLine.deleteEx(true);
-			//	Apply Discount from order
-			DiscountManagement.configureDiscountRateOff(
-				order,
-				(BigDecimal) order.get_Value("FlatDiscount"),
-				transactionName
-			);
 		});
 		//	Return
 		return Empty.newBuilder();
@@ -577,16 +560,35 @@ public class OrderServiceLogic {
 			throw new AdempiereException("@FillMandatory@ @C_Order_ID@");
 		}
 
-		// Exists Online Payment Approved
-		boolean isOnlinePaymentApproved = PaymentManagement.isOrderWithOnlinePaymentApproved(
-			orderId
-		);
+		// Check if the manual document type is flagged as IsGenerateManualDocument
+		boolean isManualDocument = false;
+		int manualDocumentTypeId = request.getManualDocumentTypeId();
+		if (manualDocumentTypeId > 0) {
+			MDocType manualDocType = MDocType.get(Env.getCtx(), manualDocumentTypeId);
+			if (manualDocType != null && manualDocType.getC_DocType_ID() > 0) {
+				isManualDocument = manualDocType.get_ValueAsBoolean("IsGenerateManualDocument");
+			}
+		}
+
+		// For manual documents, skip online payment check and always process
+		boolean processDocuments;
+		if (isManualDocument) {
+			processDocuments = true;
+		} else {
+			// Exists Online Payment Approved
+			boolean isOnlinePaymentApproved = PaymentManagement.isOrderWithOnlinePaymentApproved(
+				orderId
+			);
+			processDocuments = !isOnlinePaymentApproved;
+		}
+
 		MOrder returnOrder = ReverseSalesTransaction.returnSalesOrder(
 			pos,
 			orderId,
 			request.getDescription(),
-			!isOnlinePaymentApproved,
-			request.getManualDocumentTypeId(),
+			processDocuments,
+			isManualDocument,
+			manualDocumentTypeId,
 			request.getManualInvoiceDocumentNo(),
 			request.getManualShipmentDocumentNo(),
 			request.getManualMovementDocumentNo()

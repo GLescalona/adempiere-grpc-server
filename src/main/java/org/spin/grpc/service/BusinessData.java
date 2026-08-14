@@ -17,7 +17,9 @@ package org.spin.grpc.service;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,6 +27,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.TreeMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.adempiere.core.domains.models.I_AD_PInstance;
@@ -54,7 +58,10 @@ import org.spin.backend.grpc.common.RunBusinessProcessRequest;
 import org.spin.backend.grpc.common.UpdateEntityRequest;
 import org.spin.base.db.WhereClauseUtil;
 import org.spin.base.util.AccessUtil;
+import org.spin.base.util.ContextManager;
 import org.spin.base.util.ConvertUtil;
+import org.spin.base.util.LookupUtil;
+import org.spin.base.util.RecordWriteGuard;
 import org.spin.base.workflow.WorkflowUtil;
 import org.spin.dictionary.util.BrowserUtil;
 import org.spin.dictionary.util.DictionaryUtil;
@@ -287,6 +294,9 @@ public class BusinessData extends BusinessDataImplBase {
 				recordId = 0;
 			}
 		}
+
+		//	Validate duplicate execution BEFORE the builder creates AD_PInstance via withRecordId()
+		checkDuplicateExecution(processId, tableId, recordId, request.getParameters().getFieldsMap());
 
 		//	Call process builder
 		ProcessBuilder builder = ProcessBuilder.create(Env.getCtx())
@@ -573,7 +583,7 @@ public class BusinessData extends BusinessDataImplBase {
 			try {
 				MClientInfo clientInfo = MClientInfo.get(Env.getCtx());
 				if(clientInfo.getFileHandler_ID() <= 0) {
-					throw new AdempiereException("@FileHandler_ID@ @NotFound@");
+					throw new AdempiereException("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@");
 				}
 				MADAppRegistration genericConnector = MADAppRegistration.getById(
 					Env.getCtx(),
@@ -614,7 +624,135 @@ public class BusinessData extends BusinessDataImplBase {
 		}
 		return value;
 	}
-	
+
+	/**
+	 * Validates that the same process with the same parameters has not been recently
+	 * executed (within 2 minutes) by the same user and session.
+	 * Blocks concurrent execution (IsProcessing=Y) and recently completed duplicate runs.
+	 * @param processId  AD_Process_ID
+	 * @param recordId   Record_ID used for the process
+	 * @param requestParameters parameters map from the gRPC request
+	 */
+	private static void checkDuplicateExecution(int processId, int tableId, int recordId, Map<String, Value> requestParameters) {
+		int userId = Env.getAD_User_ID(Env.getCtx());
+		if (userId <= 0) {
+			return;
+		}
+		Timestamp twoMinutesAgo = new Timestamp(System.currentTimeMillis() - (2L * 60 * 1000));
+
+		String whereClause = "AD_Process_ID = ? "
+			// + "AND AD_Table_ID = ? "
+			+ "AND Record_ID = ? "
+			+ "AND AD_User_ID = ? AND Created >= ? "
+			+ "AND IsProcessing = 'Y' "
+		;
+		List<Object> params = new ArrayList<>();
+		params.add(processId);
+		// params.add(tableId);
+		params.add(recordId);
+		params.add(userId);
+		params.add(twoMinutesAgo);
+
+		//	Filter by current session when available
+		MSession currentSession = MSession.get(Env.getCtx(), false);
+		if (currentSession != null && currentSession.getAD_Session_ID() > 0) {
+			whereClause += " AND AD_Session_ID = ?";
+			params.add(currentSession.getAD_Session_ID());
+		}
+
+		List<MPInstance> recentInstances = new Query(
+			Env.getCtx(),
+			I_AD_PInstance.Table_Name,
+			whereClause,
+			null
+		)
+			.setParameters(params)
+			.list()
+		;
+
+		if (recentInstances.isEmpty()) {
+			return;
+		}
+
+		// TODO: Add support to browser selection and row edits.
+		TreeMap<String, String> currentFingerprint = buildParametersFingerprint(requestParameters);
+		for (MPInstance recentInstance : recentInstances) {
+			//	Block concurrent executions of the same process for the same user/session/record
+			if (recentInstance.isProcessing()) {
+				throw new AdempiereException("@Processing@ @AD_PInstance_ID@");
+			}
+			//	For recently completed instances: compare parameters to detect duplicate submission
+			MPInstancePara[] storedParams = recentInstance.getParameters();
+			TreeMap<String, String> storedFingerprint = buildStoredParametersFingerprint(storedParams);
+			if (currentFingerprint.equals(storedFingerprint)) {
+				throw new AdempiereException("@DuplicateProcessExecution@");
+			}
+		}
+	}
+
+	/**
+	 * Builds a normalized parameter fingerprint from the gRPC request parameters.
+	 * @param parameters proto Value map from the request
+	 * @return sorted map of parameter name → string value
+	 */
+	private static TreeMap<String, String> buildParametersFingerprint(Map<String, Value> parameters) {
+		TreeMap<String, String> fingerprint = new TreeMap<>();
+		if (parameters == null) {
+			return fingerprint;
+		}
+		for (Map.Entry<String, Value> entry : parameters.entrySet()) {
+			Object val = ValueManager.getObjectFromProtoValue(entry.getValue());
+			String valStr = "";
+			if (val instanceof java.math.BigDecimal) {
+				valStr = ((java.math.BigDecimal) val).toPlainString();
+			} else if (val != null) {
+				valStr = val.toString();
+			}
+			fingerprint.put(entry.getKey(), valStr);
+		}
+		return fingerprint;
+	}
+
+	/**
+	 * Builds a normalized parameter fingerprint from stored AD_PInstance_Para rows.
+	 * Each row may carry both the base value and its range (_To) counterpart.
+	 * @param params array of MPInstancePara loaded from DB
+	 * @return sorted map of parameter name → string value
+	 */
+	private static TreeMap<String, String> buildStoredParametersFingerprint(MPInstancePara[] params) {
+		TreeMap<String, String> fingerprint = new TreeMap<>();
+		if (params == null) {
+			return fingerprint;
+		}
+		for (MPInstancePara param : params) {
+			String name = param.getParameterName();
+			if (Util.isEmpty(name, true)) {
+				continue;
+			}
+			//	Resolve effective base value
+			String value = "";
+			if (!Util.isEmpty(param.getP_String(), true)) {
+				value = param.getP_String();
+			} else if (param.getP_Number() != null) {
+				value = param.getP_Number().toPlainString();
+			} else if (param.getP_Date() != null) {
+				value = param.getP_Date().toString();
+			}
+			fingerprint.put(name, value);
+
+			//	Resolve range (_To) value stored on the same row
+			if (!Util.isEmpty(param.getP_String_To(), true)) {
+				fingerprint.put(name + "_To", param.getP_String_To());
+			} else if (param.getP_Number_To() != null) {
+				fingerprint.put(name + "_To", param.getP_Number_To().toPlainString());
+			} else if (param.getP_Date_To() != null) {
+				fingerprint.put(name + "_To", param.getP_Date_To().toString());
+			}
+		}
+		return fingerprint;
+	}
+
+
 	/**
 	 * Convert a PO from query
 	 * @param request
@@ -714,6 +852,9 @@ public class BusinessData extends BusinessDataImplBase {
 		final MTable table = RecordUtil.validateAndGetTable(
 			request.getTableName()
 		);
+		if (RecordWriteGuard.isTableReadOnly(table)) {
+			throw new AdempiereException("@Ignored@ @AD_Table_ID@ (" + table.getName() + ") : @IsView@");
+		}
 
 		PO entity = table.getPO(0, null);
 		if(entity == null) {
@@ -754,33 +895,98 @@ public class BusinessData extends BusinessDataImplBase {
 		final MTable table = RecordUtil.validateAndGetTable(
 			request.getTableName()
 		);
-		
+
 		PO entity = RecordUtil.getEntity(context, table.getTableName(), request.getId(), null);
-		if(entity != null
-				&& entity.get_ID() >= 0) {
-			Map<String, Value> attributes = request.getAttributes().getFieldsMap();
-			attributes.keySet().forEach(key -> {
-				Value attribute = attributes.get(key);
-				int referenceId = DictionaryUtil.getReferenceId(entity.get_Table_ID(), key);
-				Object value = null;
-				if(referenceId > 0) {
+		if (entity == null) {
+			throw new AdempiereException("@Error@ @PO@ @NotFound@");
+		}
+		PO currentEntity = entity;
+		POAdapter adapter = new POAdapter(currentEntity);
+
+		//	Fill context
+		int windowNo = ThreadLocalRandom.current().nextInt(1, 8996 + 1);
+		ContextManager.setContextFromPO(
+			windowNo, context, entity, false
+		);
+
+		final String[] keyColumns = table.getKeyColumns();
+		Entity.Builder builder = ConvertUtil.convertEntity(entity);
+
+		if (RecordWriteGuard.isTableReadOnly(table)) {
+			log.warning("@Ignored@ @AD_Table_ID@ (" + table.getName() + ") : @IsView@ ");
+			return builder;
+		}
+
+		if (RecordWriteGuard.isForeignClient(context, currentEntity)) {
+			log.warning("@Ignored@ : Record is other client");
+			return builder;
+		}
+
+		Map<String, Value> attributes = request.getAttributes().getFieldsMap();
+		attributes.entrySet().forEach(attribute -> {
+			final String columnName = attribute.getKey();
+			if (Util.isEmpty(columnName, true) || columnName.startsWith(LookupUtil.DISPLAY_COLUMN_KEY) || columnName.endsWith("_" + LookupUtil.UUID_COLUMN_KEY)) {
+				return;
+			}
+			MColumn column = table.getColumn(columnName);
+			if (column == null || column.getAD_Column_ID() <= 0) {
+				// checks if the column exists in the database
+				return;
+			}
+			final int displayTypeId = column.getAD_Reference_ID();
+
+			String displayValue = ValueManager.getDisplayedValueFromReference(
+				context,
+				attribute.getValue(),
+				columnName,
+				displayTypeId,
+				column.getAD_Reference_Value_ID()
+			);
+
+			if (Arrays.stream(keyColumns).anyMatch(columnName::equals)) {
+				// prevent warning `PO.set_Value: Column not updateable`
+				log.warning(
+					Msg.parseTranslation(
+						context,
+						"@Ignored@ " + column.getName() + " (" + columnName + ") @NewValue@ = " + displayValue + " : @IsKey@ "
+					)
+				);
+				return;
+			}
+
+			if (RecordWriteGuard.shouldSkipColumn(currentEntity, column)) {
+				log.warning(
+					Msg.parseTranslation(
+						context,
+						"@Ignored@ " + column.getName() + " (" + columnName + ") @NewValue@ = " + displayValue + " : @NotAllowed@"
+					)
+				);
+				return;
+			}
+
+			Object value = null;
+			if (!attribute.getValue().hasNullValue()) {
+				if (displayTypeId > 0) {
 					value = ValueManager.getObjectFromProtoValue(
-						attribute,
-						referenceId
+						attribute.getValue(),
+						displayTypeId
 					);
 				} 
-				if(value == null) {
+				if (value == null) {
 					value = ValueManager.getObjectFromProtoValue(
-						attribute
+						attribute.getValue()
 					);
 				}
-				entity.set_ValueOfColumn(key, value);
-			});
-			//	Save entity
-			entity.saveEx();
-		}
-		//	Return
-		return ConvertUtil.convertEntity(entity);
+			}
+			adapter.set_ValueNoCheck(columnName, value);
+		});
+		//	Save entity
+		currentEntity.saveEx();
+
+
+		// Reload entity
+		builder = ConvertUtil.convertEntity(currentEntity);
+		return builder;
 	}
 
 
@@ -915,7 +1121,7 @@ public class BusinessData extends BusinessDataImplBase {
 			Entity.Builder valueObject = ConvertUtil.convertEntity(entity);
 			builder.addRecords(valueObject.build());
 		}
-		//	
+		//
 		builder.setRecordCount(count);
 		//	Set page token
 		if(LimitUtil.isValidNextPageToken(count, offset, limit)) {

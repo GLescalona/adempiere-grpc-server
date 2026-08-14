@@ -18,6 +18,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.adempiere.core.domains.models.I_AD_AttachmentReference;
@@ -43,6 +44,8 @@ import org.spin.backend.grpc.file_management.FileManagementGrpc.FileManagementIm
 import org.spin.backend.grpc.file_management.GetAttachmentRequest;
 import org.spin.backend.grpc.file_management.GetResourceReferenceRequest;
 import org.spin.backend.grpc.file_management.GetResourceRequest;
+import org.spin.backend.grpc.file_management.ListAttachmentFilesRequest;
+import org.spin.backend.grpc.file_management.ListAttachmentFilesResponse;
 import org.spin.backend.grpc.file_management.LoadResourceRequest;
 import org.spin.backend.grpc.file_management.Resource;
 import org.spin.backend.grpc.file_management.ResourceReference;
@@ -51,12 +54,18 @@ import org.spin.backend.grpc.file_management.SetAttachmentDescriptionRequest;
 import org.spin.backend.grpc.file_management.SetResourceReferenceDescriptionRequest;
 import org.spin.backend.grpc.file_management.SetResourceReferenceRequest;
 import org.spin.base.util.FileUtil;
+import org.spin.eca62.support.IS3;
+import org.spin.eca62.support.ResourceMetadata;
+import org.spin.eca62.support.ResourceMetadata.ContainerType;
 import org.spin.model.MADAttachmentReference;
+import org.spin.model.MADAppRegistration;
 import org.spin.service.grpc.util.base.RecordUtil;
 import org.spin.service.grpc.util.value.NumberManager;
 import org.spin.service.grpc.util.value.TextManager;
 import org.spin.service.grpc.util.value.TimeManager;
 import org.spin.util.AttachmentUtil;
+import org.spin.util.support.AppSupportHandler;
+import org.spin.util.support.IAppSupport;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
@@ -70,7 +79,7 @@ import io.grpc.stub.StreamObserver;
  */
 public class FileManagement extends FileManagementImplBase {
 	/**	Logger			*/
-	private CLogger log = CLogger.getCLogger(FileManagement.class);
+	private static CLogger log = CLogger.getCLogger(FileManagement.class);
 	
 	public String tableName = I_C_Invoice.Table_Name;
 
@@ -82,7 +91,7 @@ public class FileManagement extends FileManagementImplBase {
 	private static MClientInfo validateAndGetClientInfo() {
 		MClientInfo clientInfo = MClientInfo.get(Env.getCtx());
 		if (clientInfo == null || clientInfo.getAD_Client_ID() < 0 || clientInfo.getFileHandler_ID() <= 0) {
-			throw new AdempiereException("@FileHandler_ID@ @NotFound@");
+			throw new AdempiereException("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@");
 		}
 		return clientInfo;
 	}
@@ -156,15 +165,20 @@ public class FileManagement extends FileManagementImplBase {
 		}
 
 		MClientInfo clientInfo = MClientInfo.get(Env.getCtx());
+		if (clientInfo == null || clientInfo.getAD_Client_ID() < 0 || clientInfo.getFileHandler_ID() <= 0) {
+			log.warning("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@");
+			return null;
+		}
 		MADAttachmentReference reference = new Query(
-				Env.getCtx(),
-				I_AD_AttachmentReference.Table_Name,
-				"(UUID || '-' || FileName) = ? AND FileHandler_ID = ?",
-				null
-			)
+			Env.getCtx(),
+			I_AD_AttachmentReference.Table_Name,
+			"(UUID || '-' || FileName) = ? AND FileHandler_ID = ?",
+			null
+		)
 			.setOrderBy(I_AD_AttachmentReference.COLUMNNAME_AD_Attachment_ID + " DESC")
 			.setParameters(resourceName, clientInfo.getFileHandler_ID())
-			.first();
+			.first()
+		;
 
 		if (reference == null || reference.getAD_AttachmentReference_ID() <= 0) {
 			return null;
@@ -225,7 +239,7 @@ public class FileManagement extends FileManagementImplBase {
 		int clientId = Env.getAD_Client_ID(Env.getCtx());
 		if (!AttachmentUtil.getInstance().isValidForClient(clientId)) {
 			responseObserver.onError(
-				new AdempiereException("@FileHandler_ID@ @NotFound@")
+				new AdempiereException("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@")
 			);
 			return;
 		}
@@ -385,7 +399,8 @@ public class FileManagement extends FileManagementImplBase {
 						.withFileName(resourceReference.getFileName())
 						.withClientId(clientInfo.getAD_Client_ID())
 						.withData(data)
-						.saveAttachment();
+						.saveAttachment()
+					;
 
 					MADAttachmentReference.resetAttachmentReferenceCache(clientInfo.getFileHandler_ID(), resourceReference);
 					ResourceReference.Builder response = convertResourceReference(resourceReference);
@@ -597,6 +612,7 @@ public class FileManagement extends FileManagementImplBase {
 		// validate client info with configured file handler
 		MClientInfo clientInfo = MClientInfo.get(attachment.getCtx());
 		if (clientInfo == null || clientInfo.getAD_Client_ID() < 0 || clientInfo.getFileHandler_ID() <= 0) {
+			log.warning("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@");
 			return builder;
 		}
 
@@ -964,6 +980,7 @@ public class FileManagement extends FileManagementImplBase {
 		// validate client info with configured file handler
 		MClientInfo clientInfo = MClientInfo.get(Env.getCtx());
 		if (clientInfo == null || clientInfo.getAD_Client_ID() < 0 || clientInfo.getFileHandler_ID() <= 0) {
+			log.warning("@FileHandler_ID@ @NotFound@. @SeeClientInfoConfig@");
 			return builder;
 		}
 
@@ -994,7 +1011,105 @@ public class FileManagement extends FileManagementImplBase {
 			.count();
 
 		return builder
-			.setRecordCount(recordCount);
+			.setRecordCount(recordCount)
+		;
+	}
+
+
+
+	@Override
+	public void listAttachmentFiles(ListAttachmentFilesRequest request, StreamObserver<ListAttachmentFilesResponse> responseObserver) {
+		try {
+			if (request == null) {
+				throw new AdempiereException("Object Request Null");
+			}
+			ListAttachmentFilesResponse.Builder response = listAttachmentFiles(request);
+			responseObserver.onNext(response.build());
+			responseObserver.onCompleted();
+		} catch (Exception e) {
+			log.warning(e.getLocalizedMessage());
+			e.printStackTrace();
+			responseObserver.onError(
+				Status.INTERNAL
+					.withDescription(e.getLocalizedMessage())
+					.withCause(e)
+					.asRuntimeException()
+			);
+		}
+	}
+
+	private ListAttachmentFilesResponse.Builder listAttachmentFiles(ListAttachmentFilesRequest request) {
+		ListAttachmentFilesResponse.Builder builder = ListAttachmentFilesResponse.newBuilder();
+
+		// validate and get client info with configured file handler
+		MClientInfo clientInfo = validateAndGetClientInfo();
+
+		// validate and get table
+		final MTable table = RecordUtil.validateAndGetTable(
+			request.getTableName()
+		);
+
+		// validate record
+		int recordId = request.getRecordId();
+		if (!RecordUtil.isValidId(recordId, table.getAccessLevel())) {
+			throw new AdempiereException("@Record_ID@ / @UUID@ @NotFound@");
+		}
+
+		try {
+			// Get app registration for file handler
+			MADAppRegistration fileHandler = MADAppRegistration.getById(
+				Env.getCtx(),
+				clientInfo.getFileHandler_ID(),
+				null
+			);
+			if (fileHandler == null) {
+				throw new AdempiereException("@AD_AppRegistration_ID@ @NotFound@");
+			}
+
+			// Load S3 support
+			IAppSupport supportedApi = AppSupportHandler.getInstance().getAppSupport(fileHandler);
+			if (supportedApi == null) {
+				throw new AdempiereException("@AD_AppSupport_ID@ @NotFound@");
+			}
+			if (!IS3.class.isAssignableFrom(supportedApi.getClass())) {
+				throw new AdempiereException("@AD_AppSupport_ID@ @Unsupported@");
+			}
+			IS3 s3Handler = (IS3) supportedApi;
+
+			// Build resource metadata for the record
+			ResourceMetadata.ContainerType containerType = ContainerType.ATTACHMENT;
+			if (request.getResourceType() == ResourceType.IMAGE) {
+				containerType = ContainerType.APPLICATION;
+			} else if (request.getResourceType() == ResourceType.ARCHIVE) {
+				containerType = ContainerType.APPLICATION;
+			}
+
+			ResourceMetadata resourceMetadata = ResourceMetadata.newInstance()
+				.withClientId(Env.getAD_Client_ID(Env.getCtx()))
+				// .withUserId(Env.getAD_User_ID(Env.getCtx()))
+				.withContainerType(containerType)
+				.withTableName(request.getTableName())
+				.withRecordId(recordId)
+			;
+
+			// Add container ID if provided
+			if (!Util.isEmpty(request.getContainerId(), true)) {
+				resourceMetadata.withContainerId(request.getContainerId());
+			}
+
+			// Get file names from S3
+			List<String> fileNames = s3Handler.getResourceFileNames(resourceMetadata);
+
+			builder.setRecordCount(fileNames.size());
+			fileNames.forEach(fileName -> {
+				builder.addFileNames(fileName);
+			});
+
+		} catch (Exception e) {
+			throw new AdempiereException(e);
+		}
+
+		return builder;
 	}
 
 }
